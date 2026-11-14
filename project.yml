@@ -1,0 +1,31 @@
+name: Melete
+options:
+  bundleIdPrefix: jp.iorinu
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.Melete
+    GENERATE_INFOPLIST_FILE: YES
+    INFOPLIST_KEY_CFBundleDisplayName: Melete
+targets:
+  Melete:
+    type: application
+    platform: macOS
+    sources:
+      - path: Melete
+    settings:
+      base:
+        PRODUCT_NAME: Melete
+  MeleteTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: MeleteTests
+    dependencies:
+      - target: Melete
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.MeleteTests
