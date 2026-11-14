@@ -1,6 +1,30 @@
 import Foundation
 import SwiftData
 
+enum WorkoutDeletion {
+    static func delete(workoutID: UUID, in context: ModelContext) throws {
+        let descriptor = FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })
+        guard let workout = try context.fetch(descriptor).first else {
+            throw WorkoutDeletionError.notFound
+        }
+        context.delete(workout)
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+}
+
+enum WorkoutDeletionError: LocalizedError {
+    case notFound
+
+    var errorDescription: String? {
+        "削除対象の運動記録が見つかりません。履歴を更新してから再度お試しください。"
+    }
+}
+
 enum MeleteSchemaV1: VersionedSchema {
     static var versionIdentifier = Schema.Version(1, 0, 0)
     static var models: [ any PersistentModel.Type ] {

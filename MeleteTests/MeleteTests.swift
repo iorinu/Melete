@@ -118,4 +118,52 @@ final class MeleteTests: XCTestCase {
         XCTAssertEqual(orderedSets.map(\.sortOrder), [1, 2, 3])
         XCTAssertEqual(orderedSets.compactMap { $0.values.first?.scaledValue }, [1_000, 2_500, 3_000])
     }
+
+    func testDeletingWorkoutRemovesOnlyTargetAndCascadesWithoutRemovingExercise() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteDeleteTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("test.store")
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("DeleteTest", schema: schema, url: url, cloudKitDatabase: .none)
+        let targetID = UUID()
+        let otherID = UUID()
+        let exerciseID: UUID
+
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: false, isRequired: true, sortOrder: 0)
+            let exercise = Exercise(name: "テスト種目", metrics: [metric])
+            exerciseID = exercise.id
+            let targetSet = SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 10_000)])
+            let targetRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [targetSet])
+            let target = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [targetRecord])
+            target.id = targetID
+            let otherSet = SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 20_000)])
+            let otherRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [otherSet])
+            let other = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [otherRecord])
+            other.id = otherID
+            context.insert(exercise)
+            context.insert(target)
+            context.insert(other)
+            try context.save()
+
+            try WorkoutDeletion.delete(workoutID: targetID, in: context)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).map(\.id), [otherID])
+            XCTAssertTrue(try context.fetch(FetchDescriptor<ExerciseRecord>()).allSatisfy { $0.workout?.id == otherID })
+            XCTAssertEqual(try context.fetch(FetchDescriptor<SetRecord>()).count, 1)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<MetricValue>()).count, 1)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<Exercise>()).map(\.id), [exerciseID])
+            try context.save()
+        }
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<Workout>()).map(\.id), [otherID])
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<Exercise>()).map(\.id), [exerciseID])
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<ExerciseRecord>()).count, 1)
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<SetRecord>()).count, 1)
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<MetricValue>()).count, 1)
+    }
 }

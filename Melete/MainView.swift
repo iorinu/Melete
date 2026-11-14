@@ -8,6 +8,7 @@ struct MainView: View {
     @State private var selection: String? = "記録"
     @State private var showingExerciseForm = false
     @State private var showingWorkoutForm = false
+    @State private var pendingWorkoutDeletion: Workout?
     @State private var errorMessage: String?
 
     var body: some View {
@@ -31,9 +32,17 @@ struct MainView: View {
                 saveWorkout(day: day, entries: entries)
             }
         }
-        .alert("保存できませんでした", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+        .alert("操作できませんでした", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) { errorMessage = nil }
         } message: { Text(errorMessage ?? "") }
+        .confirmationDialog("運動記録を削除しますか？", isPresented: Binding(get: { pendingWorkoutDeletion != nil }, set: { if !$0 { pendingWorkoutDeletion = nil } }), titleVisibility: .visible) {
+            Button("この運動を削除", role: .destructive) { confirmWorkoutDeletion() }
+            Button("キャンセル", role: .cancel) { pendingWorkoutDeletion = nil }
+        } message: {
+            if let workout = pendingWorkoutDeletion {
+                Text("対象日: \(Self.displayDay(workout.day))\nこの運動の全種目・セットが削除されます。削除した内容は元に戻せません。")
+            }
+        }
     }
 
     private var history: some View {
@@ -53,7 +62,18 @@ struct MainView: View {
             } else {
                 List(workouts) { workout in
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(Self.displayDay(workout.day)).font(.headline)
+                        HStack {
+                            Text(Self.displayDay(workout.day)).font(.headline)
+                            Spacer()
+                            Button(role: .destructive) {
+                                pendingWorkoutDeletion = workout
+                            } label: {
+                                Label("削除", systemImage: "trash")
+                            }
+                            .labelStyle(.iconOnly)
+                            .help("この運動記録を削除")
+                            .accessibilityLabel("\(Self.displayDay(workout.day))の運動記録を削除")
+                        }
                         ForEach(workout.records.sorted { $0.sortOrder < $1.sortOrder }) { record in
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(record.exerciseName).fontWeight(.medium)
@@ -158,5 +178,16 @@ struct MainView: View {
         context.insert(Workout(day: day, records: records))
         do { try context.save(); return true }
         catch { context.rollback(); errorMessage = error.localizedDescription; return false }
+    }
+
+    private func confirmWorkoutDeletion() {
+        guard let workout = pendingWorkoutDeletion else { return }
+        let workoutID = workout.id
+        pendingWorkoutDeletion = nil
+        do {
+            try WorkoutDeletion.delete(workoutID: workoutID, in: context)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }

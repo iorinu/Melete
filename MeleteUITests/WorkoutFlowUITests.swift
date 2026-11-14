@@ -97,6 +97,59 @@ final class WorkoutFlowUITests: XCTestCase {
         let storeData = try Data(contentsOf: storeURL)
         XCTAssertFalse(storeData.isEmpty, "UI操作で専用SwiftDataストアが実際に作成される")
     }
+
+    func testCancelAndConfirmWorkoutDeletionAfterRelaunch() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--melete-ui-test-root", testRoot.path, "--melete-ui-test-store", storeDirectory.path]
+        app.launch()
+        guard app.staticTexts["melete-isolated-store-active"].waitForExistence(timeout: 5) else {
+            XCTFail("隔離ストア使用中の識別子がありません。安全のためUI操作を中断します。")
+            return
+        }
+        guard isolationMarkerIsValid else {
+            XCTFail("隔離ストアの識別子が一致しません。安全のためUI操作を中断します。")
+            return
+        }
+
+        app.staticTexts["種目"].click()
+        app.buttons["createExerciseButton"].click()
+        app.textFields["exerciseNameField"].tapAndReplace("削除検証用スクワット")
+        app.textFields["metricNameField0"].tapAndReplace("重量")
+        app.textFields["metricUnitField0"].tapAndReplace("kg")
+        app.buttons["saveExerciseButton"].click()
+        XCTAssertTrue(app.staticTexts["削除検証用スクワット"].waitForExistence(timeout: 5))
+
+        app.staticTexts["記録"].click()
+        app.buttons["addWorkoutButton"].click()
+        app.buttons["addExerciseToWorkoutButton"].click()
+        app.textFields["set1_metric_重量"].tapAndReplace("80")
+        app.buttons["saveWorkoutButton"].click()
+        XCTAssertTrue(historyText(containing: "重量: 80kg", in: app).waitForExistence(timeout: 5))
+
+        let deleteButton = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "の運動記録を削除")).firstMatch
+        XCTAssertTrue(deleteButton.waitForExistence(timeout: 5))
+        deleteButton.click()
+        app.buttons["キャンセル"].click()
+        XCTAssertTrue(historyText(containing: "重量: 80kg", in: app).waitForExistence(timeout: 5))
+
+        deleteButton.click()
+        app.buttons["この運動を削除"].click()
+        XCTAssertFalse(historyText(containing: "重量: 80kg", in: app).exists)
+
+        app.terminate()
+        app.launch()
+        guard app.staticTexts["melete-isolated-store-active"].waitForExistence(timeout: 5) else {
+            XCTFail("再起動後に隔離ストアを確認できません。安全のため以降の照合を中断します。")
+            return
+        }
+        guard isolationMarkerIsValid else {
+            XCTFail("再起動後に隔離ストアの識別子が一致しません。安全のため以降の照合を中断します。")
+            return
+        }
+        XCTAssertFalse(historyText(containing: "重量: 80kg", in: app).exists)
+        app.staticTexts["種目"].click()
+        XCTAssertTrue(app.staticTexts["削除検証用スクワット"].waitForExistence(timeout: 5))
+    }
 }
 
 private enum IsolationError: Error {
