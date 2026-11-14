@@ -1,5 +1,9 @@
 import SwiftUI
 
+private enum FormStyle {
+    static let accent = Color(red: 0.76, green: 0.31, blue: 0.16)
+}
+
 struct MetricDraft: Identifiable {
     let id = UUID()
     var name = ""
@@ -15,11 +19,23 @@ struct ExerciseForm: View {
     @State private var metrics = [MetricDraft()]
     @State private var validationError: String?
 
+    @ViewBuilder
+    private func formHeading(eyebrow: String, title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(eyebrow).font(.caption.weight(.bold)).tracking(2).foregroundStyle(FormStyle.accent)
+            Text(title).font(.system(.title, design: .rounded).weight(.bold))
+            Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+        }
+        .padding(.bottom, 2)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("種目を作成").font(.title2.bold())
+        VStack(alignment: .leading, spacing: 18) {
+            formHeading(eyebrow: "", title: "種目を作成", subtitle: "記録する数値項目を設定します。")
             Form {
-                TextField("種目名", text: $name).accessibilityIdentifier("exerciseNameField")
+                Section("基本情報") {
+                    TextField("種目名", text: $name).accessibilityIdentifier("exerciseNameField")
+                }
                 Section("記録項目") {
                     ForEach($metrics) { $metric in
                         VStack(alignment: .leading, spacing: 8) {
@@ -61,7 +77,8 @@ struct ExerciseForm: View {
                     if onSave(cleanedName, cleanedMetrics) { dismiss() }
                 }.keyboardShortcut(.defaultAction).accessibilityIdentifier("saveExerciseButton")
             }
-        }.padding(22).frame(width: 590, height: 560)
+        }.padding(26).frame(minWidth: 570, idealWidth: 610, minHeight: 520, idealHeight: 590)
+            .tint(FormStyle.accent)
     }
 }
 
@@ -86,9 +103,21 @@ struct WorkoutForm: View {
     @State private var selectedExerciseID: UUID?
     @State private var validationError: String?
 
+    @ViewBuilder
+    private func formHeading(eyebrow: String, title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if !eyebrow.isEmpty {
+                Text(eyebrow).font(.caption.weight(.bold)).tracking(2).foregroundStyle(FormStyle.accent)
+            }
+            Text(title).font(.system(.title, design: .rounded).weight(.bold))
+            Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+        }
+        .padding(.bottom, 2)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("運動を追加").font(.title2.bold())
+        VStack(alignment: .leading, spacing: 18) {
+            formHeading(eyebrow: "", title: "運動を追加", subtitle: "日付、種目、セットごとの数値を入力します。")
             Form {
                 DatePicker("運動日", selection: $day, in: ...Date.now, displayedComponents: .date)
                 Section("種目") {
@@ -116,7 +145,8 @@ struct WorkoutForm: View {
                 Button("保存") { save() }.keyboardShortcut(.defaultAction).disabled(entries.isEmpty)
                     .accessibilityIdentifier("saveWorkoutButton")
             }
-        }.padding(22).frame(width: 650, height: 650)
+        }.padding(26).frame(minWidth: 620, idealWidth: 680, minHeight: 600, idealHeight: 700)
+            .tint(FormStyle.accent)
             .onAppear { selectedExerciseID = exercises.first?.id }
     }
 
@@ -133,26 +163,31 @@ struct WorkoutForm: View {
             ForEach(entry.wrappedValue.sets) { set in
                 let setIndex = entry.wrappedValue.sets.firstIndex(where: { $0.id == set.id }) ?? 0
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("セット \(setIndex + 1)").fontWeight(.medium)
+                        HStack {
+                            Text("セット \(setIndex + 1)").font(.headline)
                         Spacer()
                         if entry.wrappedValue.sets.count > 1 {
                             Button("削除", role: .destructive) { entry.wrappedValue.sets.remove(at: setIndex) }
                         }
                     }
                     ForEach(metrics) { metric in
-                        HStack {
-                            Text("\(metric.name)（\(metric.unit)）\(metric.isRequired ? "*" : "" )").frame(width: 190, alignment: .leading)
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text("\(metric.name)（\(metric.unit)）\(metric.isRequired ? "*" : "" )")
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             TextField(metric.allowsDecimal ? "0.000まで" : "0以上の整数", text: valueBinding(entry: entry, setID: set.id, metric: metric))
-                                .frame(width: 140)
+                                .frame(minWidth: 100, maxWidth: 180)
                                 .textFieldStyle(.roundedBorder)
                                 .accessibilityIdentifier("set\(setIndex + 1)_metric_\(metric.name)")
                         }
                     }
-                }.padding(10).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .padding(14)
+                .overlay(alignment: .top) {
+                    Rectangle().fill(.primary.opacity(0.12)).frame(height: 1)
+                }
             }
             Button("セットを追加", systemImage: "plus") { entry.wrappedValue.sets.append(WorkoutSetDraft()) }.accessibilityIdentifier("addSetButton")
-        }.padding(.vertical, 6)
+        }.padding(.vertical, 8)
     }
 
     private func valueBinding(entry: Binding<WorkoutEntryDraft>, setID: UUID, metric: MetricDefinition) -> Binding<String> {
@@ -219,4 +254,5 @@ struct WorkoutForm: View {
               allowsDecimal || number % 1000 == 0 else { return nil }
         return number
     }
+
 }

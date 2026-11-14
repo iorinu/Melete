@@ -1,8 +1,10 @@
 import SwiftData
 import SwiftUI
+import AppKit
 
 @main
 struct MeleteApp: App {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     private let container: ModelContainer?
     private let startupError: String?
     private let isolatedStoreActive: Bool
@@ -54,22 +56,63 @@ struct MeleteApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if let container {
-                VStack(spacing: 0) {
+            Group {
+                if let container {
+                    VStack(spacing: 0) {
 #if DEBUG
-                    if isolatedStoreActive {
-                        Text("隔離ストア使用中")
-                            .accessibilityIdentifier("melete-isolated-store-active")
-                            .padding(6)
-                    }
+                        if isolatedStoreActive {
+                            Text("隔離ストア使用中")
+                                .accessibilityIdentifier("melete-isolated-store-active")
+                                .padding(6)
+                        }
 #endif
-                    MainView().modelContainer(container)
+                        MainView().modelContainer(container)
+                    }
+                } else {
+                    ContentUnavailableView("データを開けませんでした", systemImage: "externaldrive.badge.exclamationmark", description: Text("データは初期化されていません。アプリを終了して再度起動してください。\n\(startupError ?? "")"))
                 }
-            } else {
-                ContentUnavailableView("データを開けませんでした", systemImage: "externaldrive.badge.exclamationmark", description: Text("データは初期化されていません。アプリを終了して再度起動してください。\n\(startupError ?? "")"))
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
+                if reduceTransparency {
+                    Color(nsColor: .windowBackgroundColor).ignoresSafeArea()
+                } else {
+                    WindowMaterial().ignoresSafeArea()
+                }
+            }
+            .background(WindowTransparencyConfigurator())
         }
         .windowResizability(.contentSize)
+    }
+}
+
+private struct WindowMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .underWindowBackground
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
+}
+
+private struct WindowTransparencyConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { configureWindow(for: view) }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async { configureWindow(for: view) }
+    }
+
+    private func configureWindow(for view: NSView) {
+        guard let window = view.window else { return }
+        window.isOpaque = false
+        window.backgroundColor = .clear
     }
 }
 
