@@ -159,11 +159,13 @@ erDiagram
 初期版の目標として、次の2方式を利用者が設定で選べるようにする。どちらもユーザー自身のChatGPT契約枠を使うことを目的とする。片方が未設定・利用不可のときに、もう片方へ暗黙に切り替えない。選択時の既定値と、各方式を有効化できる条件は未確定である。
 
 1. **Codex CLI経由**: 利用者がインストールしたCodex App Serverへローカル標準入出力で接続する。調査したMacでは初期化とChatGPT認証状態の取得に成功したが、実際の推論、利用条件、利用者のCLIとの互換性、安全な権限制御は未検証である。
-2. **Sign in with ChatGPTによる直接接続**: アプリから利用者がChatGPTにログインし、プラン利用を許可したうえで、Responses APIを直接呼び出す方式を候補とする。OpenAIの公式資料は対象のOSS・ローカルアプリにおけるプラン利用を説明しているが、対象プラン・Meleteの適格性、Swiftでの実装および実際の推論は未検証である。Codex CLIのインストールは必須としない。
+2. **Sign in with ChatGPTによる直接接続**: アプリから利用者がChatGPTにログインし、プラン利用を許可したうえで、Responses APIを直接呼び出す方式を候補とする。Codex CLIのインストールは必須としない。2026-11-14に、このMacでPythonの一時的な検証スクリプトを使い、利用者の許可後にダミーテキストを送信し、ストリームの `response.completed` と期待した応答を確認した。この結果は対象アカウント・検証条件に限られる。Swiftでの実装、他の対象プラン、継続利用時の認証情報管理は未検証である。
 
 両方式について、選択中の接続先・認証状態・エラーを設定で区別する。直接接続のOAuth認証情報はmacOS Keychainなどの保護された領域で管理する案とし、値をログやGitに含めない。接続先ごとの認証情報・利用枠は混同しない。
 
 公式資料はApp ServerのChatGPTログイン・認証状態の取得を説明しているが、既存CLIのログインを必ず再利用できるとは確認できていない。また、既存のローカルまたはOSSアプリのApp Server認証は継続利用可能としつつ、Sign in with ChatGPTへの移行を推奨し、商用・ホスト型サービスのApp Server認証は許可されていなかったと記載している。これを新規アプリや将来の商用配布への包括的な許可と解釈せず、利用条件を確認する。
+
+なお、Sign in with ChatGPTでプラン利用を許可されたOAuth認証を取得し、Codex App Serverへ渡して推論する構成も公式に案内されている。この構成は直接接続と認証方式を共有できる候補だが、既存Codexログインの再利用とは別の方式である。Meleteでの実推論・認証情報の引き渡し・権限制御は未検証であり、既存CLIログインを使う方式を無断で置き換えない。
 
 APIキー方式は標準API料金となることが公式認証資料に記載されている。希望するサブスクリプション認証が利用できない場合に、別料金のAPIキー方式へ自動的に切り替えない。
 
@@ -255,7 +257,7 @@ AIには記録DBや任意のファイルへの直接書き込み、コマンド�
 7. 電源断・スリープ・タイムゾーン変更、長期未起動時の配信。未来日付の運動記録は不可、通知日数の境界と20時の初期値は合意済み。
 8. 進捗要約に含める期間・情報、自動声かけキャッシュの保存期間・削除タイミング。利用者に示す送信内容と設定方法。
 9. トレーニング全体のテキストメモの要否。数値以外のカスタム項目は初期版の対象外。
-10. Sign in with ChatGPTの対象プラン・利用条件、Swiftでの認証・Keychain管理、モデル選択、レスポンス形式、機能制限、および実際の推論。接続方式の既定値と利用不能時の表示。
+10. Sign in with ChatGPTの対象プラン・利用条件、Swiftでの認証・Keychain管理、モデル選択、レスポンス形式と機能制限。Pythonによる一度の実推論は確認済みだが、Swift版と継続利用は未検証。接続方式の既定値と利用不能時の表示。
 
 ## 13. 参考資料
 
@@ -268,6 +270,7 @@ AIには記録DBや任意のファイルへの直接書き込み、コマンド�
 - [Codex Pricing](https://developers.openai.com/codex/pricing/): Codex CLIとChatGPTプランの利用条件・枠についての説明。外部アプリの具体的条件は未確認。
 - [Integrating Sign in with ChatGPT in your open-source app](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt): 対象OSSアプリ等におけるChatGPT契約枠の利用方法。
 - [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference): Sign in with ChatGPTを使ったResponses APIの推論手順。
+- [Sign in with ChatGPT: Codex app-server](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server): Sign in with ChatGPTの認証をCodex App Serverへ渡す方式。Meleteでの実行は未検証。
 - [Preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations): 直接接続・Codex経由に適用されるプレビュー時の制限。
 - [Scheduling a notification locally from your app](https://developer.apple.com/documentation/usernotifications/scheduling-a-notification-locally-from-your-app): ローカル通知の予約・配信・キャンセル。停止・スリープ等の個別条件は未確認。
 - [UNCalendarNotificationTrigger](https://developer.apple.com/documentation/usernotifications/uncalendarnotificationtrigger): カレンダー条件による通知と繰り返し。開始日を遅延させた毎日通知の実現方法は未確認。
