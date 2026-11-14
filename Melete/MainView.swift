@@ -46,6 +46,7 @@ struct MainView: View {
                 Spacer()
                 Button("運動を追加", systemImage: "plus") { showingWorkoutForm = true }
                     .disabled(exercises.filter { !$0.isArchived }.isEmpty)
+                    .accessibilityIdentifier("addWorkoutButton")
             }
             if workouts.isEmpty {
                 ContentUnavailableView("記録はまだありません", systemImage: "figure.strengthtraining.traditional", description: Text(exercises.isEmpty ? "まず種目を作成してください。" : "「運動を追加」から最初の運動を記録できます。"))
@@ -78,6 +79,7 @@ struct MainView: View {
                 }
                 Spacer()
                 Button("種目を作成", systemImage: "plus") { showingExerciseForm = true }
+                    .accessibilityIdentifier("createExerciseButton")
             }
             if exercises.isEmpty {
                 ContentUnavailableView("種目はまだありません", systemImage: "dumbbell", description: Text("種目を作成すると、運動を記録できるようになります。"))

@@ -19,17 +19,17 @@ struct ExerciseForm: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("種目を作成").font(.title2.bold())
             Form {
-                TextField("種目名", text: $name)
+                TextField("種目名", text: $name).accessibilityIdentifier("exerciseNameField")
                 Section("記録項目") {
                     ForEach($metrics) { $metric in
                         VStack(alignment: .leading, spacing: 8) {
-                            TextField("項目名（例: 重量）", text: $metric.name)
+                            TextField("項目名（例: 重量）", text: $metric.name).accessibilityIdentifier("metricNameField\(metrics.firstIndex(where: { $0.id == metric.id }) ?? 0)")
                             HStack {
-                                TextField("単位（例: kg）", text: $metric.unit).frame(maxWidth: 150)
+                                TextField("単位（例: kg）", text: $metric.unit).accessibilityIdentifier("metricUnitField\(metrics.firstIndex(where: { $0.id == metric.id }) ?? 0)").frame(maxWidth: 150)
                                 Picker("形式", selection: $metric.allowsDecimal) {
                                     Text("整数").tag(false)
                                     Text("小数（第3位まで）").tag(true)
-                                }.frame(maxWidth: 210)
+                                }.accessibilityIdentifier("metricFormatPicker\(metrics.firstIndex(where: { $0.id == metric.id }) ?? 0)").frame(maxWidth: 210)
                                 Toggle("必須", isOn: $metric.isRequired).toggleStyle(.checkbox)
                             }
                         }.padding(.vertical, 4)
@@ -59,7 +59,7 @@ struct ExerciseForm: View {
                         return
                     }
                     if onSave(cleanedName, cleanedMetrics) { dismiss() }
-                }.keyboardShortcut(.defaultAction)
+                }.keyboardShortcut(.defaultAction).accessibilityIdentifier("saveExerciseButton")
             }
         }.padding(22).frame(width: 590, height: 560)
     }
@@ -103,8 +103,8 @@ struct WorkoutForm: View {
                             Picker("種目を選択", selection: $selectedExerciseID) {
                                 Text("選択してください").tag(UUID?.none)
                                 ForEach(exercises) { exercise in Text(exercise.name).tag(Optional(exercise.id)) }
-                            }
-                            Button("追加") { addSelectedExercise() }.disabled(selectedExerciseID == nil)
+                            }.accessibilityIdentifier("exercisePicker")
+                            Button("追加") { addSelectedExercise() }.disabled(selectedExerciseID == nil).accessibilityIdentifier("addExerciseToWorkoutButton")
                         }
                     }
                 }
@@ -114,6 +114,7 @@ struct WorkoutForm: View {
                 Spacer()
                 Button("キャンセル") { dismiss() }
                 Button("保存") { save() }.keyboardShortcut(.defaultAction).disabled(entries.isEmpty)
+                    .accessibilityIdentifier("saveWorkoutButton")
             }
         }.padding(22).frame(width: 650, height: 650)
             .onAppear { selectedExerciseID = exercises.first?.id }
@@ -145,11 +146,12 @@ struct WorkoutForm: View {
                             TextField(metric.allowsDecimal ? "0.000まで" : "0以上の整数", text: valueBinding(entry: entry, setID: set.id, metric: metric))
                                 .frame(width: 140)
                                 .textFieldStyle(.roundedBorder)
+                                .accessibilityIdentifier("set\(setIndex + 1)_metric_\(metric.name)")
                         }
                     }
                 }.padding(10).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
             }
-            Button("セットを追加", systemImage: "plus") { entry.wrappedValue.sets.append(WorkoutSetDraft()) }
+            Button("セットを追加", systemImage: "plus") { entry.wrappedValue.sets.append(WorkoutSetDraft()) }.accessibilityIdentifier("addSetButton")
         }.padding(.vertical, 6)
     }
 

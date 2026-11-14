@@ -3,6 +3,56 @@ import SwiftData
 @testable import Melete
 
 final class MeleteTests: XCTestCase {
+    func testUITestStoreSelectionRequiresValidOwnedPath() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteIsolationTests-\(UUID().uuidString)", isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        try Data("Melete UI test root v1".utf8).write(to: root.appendingPathComponent(".melete-ui-test-root"))
+
+        let store = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: store, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: store.path)
+        try Data(UUID().uuidString.utf8).write(to: store.appendingPathComponent(".melete-ui-test-store"))
+
+        let validArguments = ["--melete-ui-test-root", root.path, "--melete-ui-test-store", store.path]
+        XCTAssertNotNil(UITestStoreIsolation.storeURL(arguments: validArguments))
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("MeleteUITest", schema: schema, url: store.appendingPathComponent("Melete.store"), cloudKitDatabase: .none)
+        _ = try ModelContainer(for: schema, configurations: [configuration])
+        XCTAssertNotNil(UITestStoreIsolation.storeURL(arguments: validArguments), "初回起動後に作成されるストア関連ファイルを許可する")
+        XCTAssertTrue(Set(try FileManager.default.contentsOfDirectory(atPath: store.path)).isSubset(of: [".melete-ui-test-store", "Melete.store", "Melete.store-wal", "Melete.store-shm"]))
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: []))
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: ["--melete-ui-test-root", root.path, "--melete-ui-test-store"]))
+
+        try Data("not-a-uuid".utf8).write(to: store.appendingPathComponent(".melete-ui-test-store"))
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: validArguments))
+        try Data(UUID().uuidString.utf8).write(to: store.appendingPathComponent(".melete-ui-test-store"))
+
+        let unknown = store.appendingPathComponent("unexpected")
+        try Data().write(to: unknown)
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: validArguments))
+        try FileManager.default.removeItem(at: unknown)
+
+        let storeLink = store.appendingPathComponent("Melete.store-link")
+        try FileManager.default.createSymbolicLink(at: storeLink, withDestinationURL: store.appendingPathComponent("Melete.store"))
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: validArguments))
+        try FileManager.default.removeItem(at: storeLink)
+
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteOutside-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        try Data(UUID().uuidString.utf8).write(to: outside.appendingPathComponent(".melete-ui-test-store"))
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: ["--melete-ui-test-root", root.path, "--melete-ui-test-store", outside.path]))
+
+        let link = root.appendingPathComponent("linked", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: store)
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: ["--melete-ui-test-root", root.path, "--melete-ui-test-store", link.path]))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: validArguments))
+    }
+
     func testMetricInputBoundaries() {
         XCTAssertEqual(MetricInput.parse("0", allowsDecimal: false), 0)
         XCTAssertEqual(MetricInput.parse("12", allowsDecimal: false), 12_000)

@@ -29,3 +29,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.MeleteTests
+  MeleteUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: MeleteUITests
+    dependencies:
+      - target: Melete
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.MeleteUITests
