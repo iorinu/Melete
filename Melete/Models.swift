@@ -43,6 +43,23 @@ struct ValidatedWorkoutValue {
     let scaledValue: Int64?
 }
 
+struct WorkoutSetAdditionDraft: Identifiable {
+    let id: UUID
+    let recordID: UUID
+    let exerciseID: UUID
+    let exerciseName: String
+    let metrics: [WorkoutSetMetricDraft]
+    var values: [UUID: String]
+}
+
+struct WorkoutSetMetricDraft: Equatable {
+    let id: UUID
+    let name: String
+    let unit: String
+    let allowsDecimal: Bool
+    let isRequired: Bool
+}
+
 enum WorkoutValueEditing {
     static func date(from day: String, calendar: Calendar = .current) -> Date? {
         let parts = day.split(separator: "-", omittingEmptySubsequences: false)
@@ -97,27 +114,72 @@ enum WorkoutValueEditing {
         }
     }
 
-    static func save(_ drafts: [WorkoutValueEditDraft], day: Date, to workout: Workout, calendar: Calendar = .current, now: Date = .now, persist: () throws -> Void) throws {
-        guard case let .success(values) = validatedValues(from: drafts) else {
-            throw WorkoutValueEditError.invalidDrafts
+    static func appendSetDraft(for record: ExerciseRecord, exercise: Exercise) -> WorkoutSetAdditionDraft? {
+        guard exercise.id == record.exerciseID, !exercise.isArchived else { return nil }
+        let metrics = exercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }.map {
+            WorkoutSetMetricDraft(id: $0.id, name: $0.name, unit: $0.unit, allowsDecimal: $0.allowsDecimal, isRequired: $0.isRequired)
         }
+        return WorkoutSetAdditionDraft(id: UUID(), recordID: record.id, exerciseID: exercise.id, exerciseName: exercise.name, metrics: metrics, values: [:])
+    }
+
+    static func save(_ drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft], day: Date, to workout: Workout, exercises: [Exercise], calendar: Calendar = .current, now: Date = .now, discard: (SetRecord) -> Void = { _ in }, persist: () throws -> Void) throws {
+        guard case let .success(values) = validatedValues(from: drafts) else { throw WorkoutValueEditError.invalidDrafts }
         guard calendar.startOfDay(for: day) <= calendar.startOfDay(for: now) else { throw WorkoutValueEditError.futureDay }
         guard Self.date(from: workout.day, calendar: calendar) != nil else { throw WorkoutValueEditError.invalidStoredDay }
+
+        var additionsToInsert: [(ExerciseRecord, SetRecord)] = []
+        var nextOrders: [UUID: Int] = [:]
+        var seenAdditionIDs = Set<UUID>()
+        for addition in additions {
+            guard seenAdditionIDs.insert(addition.id).inserted else { throw WorkoutValueEditError.duplicateAdditionDraft }
+            guard let record = workout.records.first(where: { $0.id == addition.recordID }),
+                  let exercise = exercises.first(where: { $0.id == addition.exerciseID }),
+                  record.exerciseID == exercise.id, !exercise.isArchived else { throw WorkoutValueEditError.exerciseUnavailable }
+            let current = exercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }.map {
+                WorkoutSetMetricDraft(id: $0.id, name: $0.name, unit: $0.unit, allowsDecimal: $0.allowsDecimal, isRequired: $0.isRequired)
+            }
+            guard current == addition.metrics else { throw WorkoutValueEditError.metricsChanged }
+            guard !current.isEmpty else { throw WorkoutValueEditError.emptySetMetrics }
+            let baseOrder = nextOrders[record.id] ?? record.sets.map(\.sortOrder).max() ?? 0
+            let (setOrder, overflow) = baseOrder.addingReportingOverflow(1)
+            guard !overflow else { throw WorkoutValueEditError.setOrderOverflow }
+            var savedValues: [MetricValue] = []
+            for metric in current {
+                let raw = (addition.values[metric.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let parsed = raw.isEmpty ? nil : MetricInput.parse(raw, allowsDecimal: metric.allowsDecimal)
+                if !raw.isEmpty && parsed == nil { throw WorkoutValueEditError.invalid(exerciseName: addition.exerciseName, setOrder: setOrder, metricName: metric.name) }
+                if metric.isRequired && parsed == nil { throw WorkoutValueEditError.required(exerciseName: addition.exerciseName, setOrder: setOrder, metricName: metric.name) }
+                guard let definition = exercise.metrics.first(where: { $0.id == metric.id && $0.isActive }) else { throw WorkoutValueEditError.metricsChanged }
+                savedValues.append(MetricValue(metric: definition, scaledValue: parsed))
+            }
+            let set = SetRecord(sortOrder: setOrder, values: savedValues)
+            nextOrders[record.id] = setOrder
+            additionsToInsert.append((record, set))
+        }
+
         let originalDay = workout.day
-        let newDay = Workout.dayString(from: day, calendar: calendar)
         let originalValues = workout.records.flatMap { $0.sets }.flatMap(\.values).map { ($0.id, $0.scaledValue) }
-        workout.day = newDay
+        workout.day = Workout.dayString(from: day, calendar: calendar)
         apply(values, to: workout)
+        for (record, set) in additionsToInsert { record.sets.append(set) }
         do {
             try persist()
         } catch {
-            let modelValues = workout.records.flatMap({ $0.sets }).flatMap(\.values)
-            for (valueID, original) in originalValues {
-                modelValues.first(where: { $0.id == valueID })?.scaledValue = original
+            for (record, set) in additionsToInsert {
+                record.sets.removeAll { $0.id == set.id }
+                for value in set.values { value.setRecord = nil }
+                set.exerciseRecord = nil
+                discard(set)
             }
+            let modelValues = workout.records.flatMap({ $0.sets }).flatMap(\.values)
+            for (valueID, original) in originalValues { modelValues.first(where: { $0.id == valueID })?.scaledValue = original }
             workout.day = originalDay
             throw error
         }
+    }
+
+    static func save(_ drafts: [WorkoutValueEditDraft], day: Date, to workout: Workout, calendar: Calendar = .current, now: Date = .now, persist: () throws -> Void) throws {
+        try save(drafts, additions: [], day: day, to: workout, exercises: [], calendar: calendar, now: now, persist: persist)
     }
 }
 
@@ -127,6 +189,11 @@ enum WorkoutValueEditError: LocalizedError {
     case invalidDrafts
     case invalidStoredDay
     case futureDay
+    case exerciseUnavailable
+    case metricsChanged
+    case duplicateAdditionDraft
+    case setOrderOverflow
+    case emptySetMetrics
 
     var errorDescription: String? {
         switch self {
@@ -135,6 +202,11 @@ enum WorkoutValueEditError: LocalizedError {
         case .invalidDrafts: "入力値を確認してください。"
         case .invalidStoredDay: "保存済みの運動日が不正なため、編集できません。"
         case .futureDay: "運動日は今日以前の日付を選択してください。"
+        case .exerciseUnavailable: "種目が見つからないかアーカイブ済みです。画面を開き直してください。"
+        case .metricsChanged: "種目の有効項目が変更されました。入力内容を確認して再度お試しください。"
+        case .duplicateAdditionDraft: "追加セットの入力が重複しています。画面を開き直してください。"
+        case .setOrderOverflow: "セット番号の上限に達したため、セットを追加できません。"
+        case .emptySetMetrics: "有効な項目がない種目には、空のセットを追加できません。"
         }
     }
 }

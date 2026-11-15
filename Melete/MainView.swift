@@ -103,8 +103,8 @@ struct MainView: View {
             }
         }
         .sheet(item: $editingWorkout) { workout in
-            WorkoutValueEditForm(workout: workout) { day, drafts in
-                saveWorkoutEdits(workout: workout, day: day, drafts: drafts)
+            WorkoutValueEditForm(workout: workout, exercises: exercises) { day, drafts, additions in
+                saveWorkoutEdits(workout: workout, day: day, drafts: drafts, additions: additions)
             }
         }
         .alert("操作できませんでした", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
@@ -479,9 +479,9 @@ struct MainView: View {
         catch { context.rollback(); errorMessage = error.localizedDescription; return false }
     }
 
-    private func saveWorkoutEdits(workout: Workout, day: Date, drafts: [WorkoutValueEditDraft]) -> String? {
+    private func saveWorkoutEdits(workout: Workout, day: Date, drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft]) -> String? {
         do {
-            try WorkoutValueEditing.save(drafts, day: day, to: workout) { try context.save() }
+            try WorkoutValueEditing.save(drafts, additions: additions, day: day, to: workout, exercises: exercises, discard: { context.delete($0) }) { try context.save() }
             return nil
         } catch {
             return error.localizedDescription

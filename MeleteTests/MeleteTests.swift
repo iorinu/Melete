@@ -200,7 +200,7 @@ final class MeleteTests: XCTestCase {
             XCTAssertEqual(drafts.first { $0.valueID == targetValueID }?.text, "", "失敗後も編集入力を保持する")
             XCTAssertEqual(discardedDraft.first { $0.valueID == targetValueID }?.text, "8", "破棄したdraftの値はモデルに反映しない")
 
-            try WorkoutValueEditing.save(drafts, day: editedDay, to: target, calendar: testCalendar, now: fixedNow) { try context.save() }
+            try WorkoutValueEditing.save(drafts, additions: [], day: editedDay, to: target, exercises: [exercise], calendar: testCalendar, now: fixedNow) { try context.save() }
             XCTAssertEqual(target.createdAt, targetCreatedAt)
             XCTAssertEqual(targetSet.createdAt, recordCreatedAt)
         }
@@ -266,6 +266,206 @@ final class MeleteTests: XCTestCase {
         XCTAssertNoThrow(try WorkoutValueEditing.save(drafts, day: originalDate, to: workout, calendar: calendar, now: now) {})
         XCTAssertNil(value.scaledValue, "任意項目を空欄にした場合は値を消し、日付は一緒に扱う")
         XCTAssertEqual(workout.day, "2026-11-14")
+    }
+
+    func testWorkoutValueEditingSavesAdditionsAtomicallyAndReopensStore() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteWorkoutSetAddition-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("WorkoutSetAddition", schema: schema, url: directory.appendingPathComponent("test.store"), cloudKitDatabase: .none)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 15, hour: 12)))
+        let originalDay = try XCTUnwrap(calendar.date(from: DateComponents(year: 2024, month: 2, day: 28)))
+        let editedDay = try XCTUnwrap(calendar.date(from: DateComponents(year: 2024, month: 2, day: 29, hour: 22)))
+        let targetID = UUID()
+        let metricID = UUID()
+        let oldValueID = UUID()
+        let createdWorkoutAt: Date
+        let createdRecordAt: Date
+        let context: ModelContext
+        let workout: Workout
+        let record: ExerciseRecord
+        let exercise: Exercise
+        let oldValue: MetricValue
+
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            context = ModelContext(container)
+            let required = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+            required.id = metricID
+            let optional = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 1)
+            exercise = Exercise(name: "種目", metrics: [required, optional])
+            oldValue = MetricValue(metric: required, scaledValue: 5_000)
+            oldValue.id = oldValueID
+            let oldSet = SetRecord(sortOrder: 2, values: [oldValue, MetricValue(metric: optional, scaledValue: nil)])
+            record = ExerciseRecord(exercise: exercise, sortOrder: 1, sets: [oldSet])
+            workout = Workout(day: originalDay, records: [record], calendar: calendar)
+            workout.id = targetID
+            createdWorkoutAt = workout.createdAt
+            createdRecordAt = oldSet.createdAt
+            let other = Workout(day: now, records: [ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [])], calendar: calendar)
+            context.insert(exercise)
+            context.insert(workout)
+            context.insert(other)
+            try context.save()
+        }
+
+        var edits = WorkoutValueEditing.drafts(for: workout)
+        edits[edits.firstIndex { $0.valueID == oldValueID }!].text = "6.25"
+        let firstDraft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+        let secondDraft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+        var first = firstDraft
+        first.values[first.metrics[0].id] = "0"
+        first.values[first.metrics[1].id] = ""
+        var second = secondDraft
+        second.values[second.metrics[0].id] = "7.5"
+        second.values[second.metrics[1].id] = "12"
+        XCTAssertEqual(record.sets.count, 1, "保存前はモデルに追加しない。キャンセル時も元のまま")
+        XCTAssertEqual(oldValue.scaledValue, 5_000)
+
+        var invalidAddition = first
+        invalidAddition.values[first.metrics[0].id] = ""
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [invalidAddition], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) {})
+        invalidAddition.values[first.metrics[0].id] = "-1"
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [invalidAddition], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) {})
+        invalidAddition.values[first.metrics[0].id] = "1.2345"
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [invalidAddition], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) {})
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [first, first], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) {}, "追加draft重複を拒否")
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [first], day: now.addingTimeInterval(86_400), to: workout, exercises: [exercise], calendar: calendar, now: now) {}, "未来日を拒否")
+        XCTAssertEqual(record.sets.count, 1, "入力拒否のどの場合もモデルを変更しない")
+        XCTAssertEqual(workout.day, Workout.dayString(from: originalDay, calendar: calendar))
+        XCTAssertEqual(oldValue.scaledValue, 5_000)
+
+        let originalStoredDay = workout.day
+        var unsavedOtherValue: MetricValue?
+        // 他Workoutへの未保存変更も、対象の保存失敗時に巻き戻さない。
+        let otherWorkout = try XCTUnwrap(try context.fetch(FetchDescriptor<Workout>()).first { $0.id != targetID })
+        let otherMetric = exercise.metrics[0]
+        unsavedOtherValue = MetricValue(metric: otherMetric, scaledValue: 99_000)
+        let otherRecord = try XCTUnwrap(otherWorkout.records.first)
+        let otherSet = SetRecord(sortOrder: 1, values: [unsavedOtherValue!])
+        otherRecord.sets.append(otherSet)
+        var discarded: [SetRecord] = []
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [first, second], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now, discard: { set in discarded.append(set); context.delete(set) }) {
+            throw NSError(domain: "InjectedSaveFailure", code: 1)
+        })
+        XCTAssertEqual(workout.day, originalStoredDay)
+        XCTAssertEqual(oldValue.scaledValue, 5_000)
+        XCTAssertEqual(otherRecord.sets.count, 1, "他の未保存変更は維持")
+        XCTAssertEqual(discarded.count, 2)
+        XCTAssertTrue(discarded.allSatisfy { $0.values.allSatisfy { $0.setRecord == nil } }, "失敗した新規Valueを孤児として残さない")
+        XCTAssertEqual(record.sets.count, 1, "失敗時に追加セットを残さない")
+
+        try WorkoutValueEditing.save(edits, additions: [first, second], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) { try context.save() }
+        XCTAssertEqual(record.sets.sorted { $0.sortOrder < $1.sortOrder }.map(\.sortOrder), [2, 3, 4])
+        XCTAssertEqual(record.sets.filter { $0.sortOrder > 2 }.map(\.createdAt).count, 2)
+        XCTAssertEqual(workout.createdAt, createdWorkoutAt)
+        XCTAssertEqual(record.sets.first { $0.sortOrder == 2 }?.createdAt, createdRecordAt)
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let saved = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == targetID })
+        XCTAssertEqual(saved.day, Workout.dayString(from: editedDay, calendar: calendar))
+        XCTAssertEqual(saved.createdAt, createdWorkoutAt)
+        let savedRecord = try XCTUnwrap(saved.records.first)
+        XCTAssertEqual(savedRecord.exerciseName, "種目")
+        XCTAssertEqual(savedRecord.sets.map(\.sortOrder).sorted(), [2, 3, 4], "再試行で重複セットを作らない")
+        XCTAssertEqual(savedRecord.sets.first { $0.sortOrder == 2 }?.values.first { $0.id == oldValueID }?.scaledValue, 6_250)
+        let addedZero = try XCTUnwrap(savedRecord.sets.first { $0.sortOrder == 3 }?.values.first { $0.metricID == metricID })
+        XCTAssertEqual(addedZero.scaledValue, 0, "0とnilを区別")
+        XCTAssertNil(savedRecord.sets.first { $0.sortOrder == 3 }?.values.first { $0.name == "回数" }?.scaledValue)
+        XCTAssertEqual(savedRecord.sets.first { $0.sortOrder == 4 }?.values.first { $0.name == "回数" }?.scaledValue, 12_000)
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<Workout>()).count, 2)
+    }
+
+    func testWorkoutSetAdditionRejectsUnavailableExercisesSnapshotDriftAndOverflow() throws {
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "種目", metrics: [metric])
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: nil)])])
+        let workout = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [record])
+        let day = try XCTUnwrap(WorkoutValueEditing.date(from: workout.day))
+        let edits = WorkoutValueEditing.drafts(for: workout)
+        let baseline = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+
+        exercise.isArchived = true
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [baseline], day: day, to: workout, exercises: [exercise]) {})
+        XCTAssertEqual(record.sets.count, 1)
+        exercise.isArchived = false
+
+        let nonexistent = WorkoutSetAdditionDraft(
+            id: UUID(), recordID: baseline.recordID, exerciseID: UUID(),
+            exerciseName: baseline.exerciseName, metrics: baseline.metrics, values: baseline.values
+        )
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [nonexistent], day: day, to: workout, exercises: [exercise]) {})
+        XCTAssertEqual(record.sets.count, 1)
+
+        let changedMetricDraft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+        for change in 0..<4 {
+            let originalName = metric.name
+            let originalUnit = metric.unit
+            let originalRequired = metric.isRequired
+            let originalActive = metric.isActive
+            switch change {
+            case 0: metric.name = "変更後"
+            case 1: metric.unit = "lb"
+            case 2: metric.isRequired = true
+            default: metric.isActive = false
+            }
+            let beforeDay = workout.day
+            let beforeValue = record.sets[0].values[0].scaledValue
+            XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [changedMetricDraft], day: day, to: workout, exercises: [exercise]) {})
+            XCTAssertEqual(workout.day, beforeDay)
+            XCTAssertEqual(record.sets.count, 1)
+            XCTAssertEqual(record.sets[0].values[0].scaledValue, beforeValue)
+            metric.name = originalName
+            metric.unit = originalUnit
+            metric.isRequired = originalRequired
+            metric.isActive = originalActive
+        }
+
+        record.sets[0].sortOrder = Int.max
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [baseline], day: day, to: workout, exercises: [exercise]) { XCTFail("overflow時はpersistしない") }) { error in
+            XCTAssertEqual((error as? WorkoutValueEditError)?.errorDescription, WorkoutValueEditError.setOrderOverflow.errorDescription)
+        }
+        XCTAssertEqual(record.sets.count, 1, "順序overflow時に追加セットを残さない")
+    }
+
+    func testWorkoutSetAdditionAllowsEmptyOptionalSetAndKeepsZeroDistinct() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteOptionalSet-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("OptionalSet", schema: schema, url: directory.appendingPathComponent("test.store"), cloudKitDatabase: .none)
+        let workoutID = UUID()
+        let recordID = UUID()
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            let metric = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 0)
+            let exercise = Exercise(name: "種目", metrics: [metric])
+            let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [])
+            record.id = recordID
+            let workout = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [record])
+            workout.id = workoutID
+            context.insert(exercise)
+            context.insert(workout)
+            try context.save()
+
+            let empty = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+            var zero = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+            zero.values[metric.id] = "0"
+            try WorkoutValueEditing.save([], additions: [empty, zero], day: WorkoutValueEditing.date(from: workout.day)!, to: workout, exercises: [exercise]) { try context.save() }
+        }
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let savedWorkout = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workoutID })
+        let savedRecord = try XCTUnwrap(savedWorkout.records.first { $0.id == recordID })
+        let emptySet = try XCTUnwrap(savedRecord.sets.first { $0.sortOrder == 1 })
+        let zeroSet = try XCTUnwrap(savedRecord.sets.first { $0.sortOrder == 2 })
+        XCTAssertNil(emptySet.values.first?.scaledValue, "未入力はnilのまま保存")
+        XCTAssertEqual(zeroSet.values.first?.scaledValue, 0, "入力した0はnilと区別して保存")
     }
 
     func testWorkoutStoredDayRejectsMalformedAndImpossibleDates() throws {
