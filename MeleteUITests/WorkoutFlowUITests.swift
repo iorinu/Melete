@@ -48,7 +48,7 @@ final class WorkoutFlowUITests: XCTestCase {
             return
         }
 
-        app.staticTexts["種目"].click()
+        app.buttons["種目"].click()
         app.buttons["createExerciseButton"].click()
         app.textFields["exerciseNameField"].tapAndReplace("UIテストベンチプレス")
         app.textFields["metricNameField0"].tapAndReplace("重量")
@@ -61,7 +61,7 @@ final class WorkoutFlowUITests: XCTestCase {
         app.buttons["saveExerciseButton"].click()
 
         XCTAssertTrue(app.staticTexts["UIテストベンチプレス"].waitForExistence(timeout: 5))
-        app.staticTexts["記録"].click()
+        app.buttons["記録"].click()
         app.buttons["addWorkoutButton"].click()
         app.buttons["addExerciseToWorkoutButton"].click()
         app.textFields["set1_metric_重量"].tapAndReplace("62.5")
@@ -70,6 +70,7 @@ final class WorkoutFlowUITests: XCTestCase {
         app.textFields["set2_metric_重量"].tapAndReplace("60.25")
         app.textFields["set2_metric_回数"].tapAndReplace("10")
         app.buttons["saveWorkoutButton"].click()
+        XCTAssertTrue(historyText(containing: "重量: 62.5kg", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["addWorkoutButton"].waitForExistence(timeout: 5))
 
         XCTAssertTrue(historyText(containing: "62.5", in: app).waitForExistence(timeout: 5))
@@ -111,7 +112,7 @@ final class WorkoutFlowUITests: XCTestCase {
             return
         }
 
-        app.staticTexts["種目"].click()
+        app.buttons["種目"].click()
         app.buttons["createExerciseButton"].click()
         app.textFields["exerciseNameField"].tapAndReplace("削除検証用スクワット")
         app.textFields["metricNameField0"].tapAndReplace("重量")
@@ -119,7 +120,7 @@ final class WorkoutFlowUITests: XCTestCase {
         app.buttons["saveExerciseButton"].click()
         XCTAssertTrue(app.staticTexts["削除検証用スクワット"].waitForExistence(timeout: 5))
 
-        app.staticTexts["記録"].click()
+        app.buttons["記録"].click()
         app.buttons["addWorkoutButton"].click()
         app.buttons["addExerciseToWorkoutButton"].click()
         app.textFields["set1_metric_重量"].tapAndReplace("80")
@@ -147,7 +148,7 @@ final class WorkoutFlowUITests: XCTestCase {
             return
         }
         XCTAssertFalse(historyText(containing: "重量: 80kg", in: app).exists)
-        app.staticTexts["種目"].click()
+        app.buttons["種目"].click()
         XCTAssertTrue(app.staticTexts["削除検証用スクワット"].waitForExistence(timeout: 5))
     }
 }

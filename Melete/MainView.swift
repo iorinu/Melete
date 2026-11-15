@@ -9,7 +9,7 @@ struct MainView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Exercise.name) private var exercises: [Exercise]
     @Query(sort: \Workout.day, order: .reverse) private var workouts: [Workout]
-    @State private var selection: String? = "記録"
+    @State private var selection: String? = "ホーム"
     @FocusState private var focusedSection: String?
     @State private var showingExerciseForm = false
     @State private var showingWorkoutForm = false
@@ -26,11 +26,11 @@ struct MainView: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 14)
                     .padding(.bottom, 8)
-                ForEach(["記録", "種目"], id: \.self) { item in
+                ForEach(["ホーム", "記録", "種目"], id: \.self) { item in
                     Button {
                         selection = item
                     } label: {
-                        Label(item, systemImage: item == "記録" ? "calendar" : "dumbbell")
+                        Label(item, systemImage: Self.symbol(for: item))
                             .symbolVariant(item == selection ? .fill : .none)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 12)
@@ -52,7 +52,9 @@ struct MainView: View {
             .frame(width: 196, alignment: .leading)
             .padding(.horizontal, 12)
             Group {
-                if selection == "種目" { exerciseList } else { history }
+                if selection == "ホーム" { home }
+                else if selection == "種目" { exerciseList }
+                else { history }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -77,6 +79,79 @@ struct MainView: View {
             if let workout = pendingWorkoutDeletion {
                 Text("対象日: \(Self.displayDay(workout.day))\nこの運動の全種目・セットが削除されます。削除した内容は元に戻せません。")
             }
+        }
+    }
+
+    private var home: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("ホーム")
+                        .font(.system(size: 32, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text("最近の運動記録を振り返れます。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let workout = workouts.first {
+                    VStack(alignment: .leading, spacing: 18) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("直近の運動")
+                                .font(.title2.weight(.semibold))
+                            Spacer()
+                            Button("履歴を見る") { selection = "記録" }
+                                .buttonStyle(.link)
+                        }
+                        Text(Self.displayDay(workout.day))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        ForEach(workout.records.sorted { $0.sortOrder < $1.sortOrder }) { record in
+                            VStack(alignment: .leading, spacing: 9) {
+                                Text(record.exerciseName).font(.headline)
+                                ForEach(record.sets.sorted { $0.sortOrder < $1.sortOrder }) { set in
+                                    Text("セット \(set.sortOrder)　" + set.values.compactMap(displayValue).joined(separator: "　·　"))
+                                        .font(.system(.body, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            if record.id != workout.records.sorted(by: { $0.sortOrder < $1.sortOrder }).last?.id {
+                                Divider()
+                            }
+                        }
+                    }
+                    .padding(22)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(MeleteStyle.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+                } else {
+                    ContentUnavailableView {
+                        Label("運動記録はまだありません", systemImage: "figure.strengthtraining.traditional")
+                    } description: {
+                        Text(exercises.filter { !$0.isArchived }.isEmpty
+                             ? "まず種目を作成すると、運動を記録できます。"
+                             : "運動を記録すると、ここに最新の内容が表示されます。")
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 180)
+                }
+
+                Text("カレンダー・目標・分析・設定・AIチャットは未実装です。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(28)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .scrollContentBackground(.hidden)
+    }
+
+    private static func symbol(for item: String) -> String {
+        switch item {
+        case "ホーム": "house"
+        case "記録": "calendar"
+        default: "dumbbell"
         }
     }
 

@@ -13,6 +13,7 @@ Melete は、筋力トレーニング等の種目・セット別の数値を記�
 - `Melete/Forms.swift`, `Melete/MetricInput.swift`: 入力フォームと数値検証
 - `MeleteTests/MeleteTests.swift`: 単体テスト
 - `MeleteUITests/WorkoutFlowUITests.swift`: 隔離ストアでの画面フローのテスト
+- `MeleteUITests/WindowProbeSmokeUITests.swift`: 保存操作なしで起動ウィンドウと隔離ストアを確認するスモークテスト
 - `docs/design-doc.md`: ユーザー確認待ちの設計案。実装済み仕様とは区別する
 
 ## 生成物とコマンド
@@ -25,7 +26,11 @@ Melete は、筋力トレーニング等の種目・セット別の数値を記�
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project Melete.xcodeproj -scheme Melete build
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project Melete.xcodeproj -scheme Melete test
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project Melete.xcodeproj -scheme Melete -only-testing:MeleteUITests/WorkoutFlowUITests test
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project Melete.xcodeproj -scheme Melete-WindowProbe -only-testing:MeleteUITests/WindowProbeSmokeUITests test
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project Melete.xcodeproj -scheme Melete-WindowProbe test
 ```
+
+`Melete-WindowProbe` はUIテスト起動時のウィンドウ確認およびUIテスト専用で、アプリIDは `jp.iorinu.Melete.UITesting` です。通常の `Melete` schemeは従来どおり `jp.iorinu.Melete` を使い、既存データ向けのビルド・テストに使用します。
 
 Xcode のインストール先が異なる環境では、`DEVELOPER_DIR` のパスを適宜読み替えてください。
 

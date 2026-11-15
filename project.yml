@@ -10,6 +10,10 @@ settings:
     PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.Melete
     GENERATE_INFOPLIST_FILE: YES
     INFOPLIST_KEY_CFBundleDisplayName: Melete
+configs:
+  Debug: debug
+  Release: release
+  WindowProbe: debug
 targets:
   Melete:
     type: application
@@ -19,6 +23,9 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Melete
+      configs:
+        WindowProbe:
+          PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.Melete.UITesting
   MeleteTests:
     type: bundle.unit-test
     platform: macOS
@@ -39,3 +46,30 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.MeleteUITests
+schemes:
+  Melete:
+    build:
+      targets:
+        Melete: all
+        MeleteTests: [test]
+        MeleteUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - name: MeleteTests
+        - name: MeleteUITests
+  Melete-WindowProbe:
+    build:
+      targets:
+        Melete: all
+        MeleteTests: [test]
+        MeleteUITests: [test]
+    run:
+      config: WindowProbe
+    test:
+      config: WindowProbe
+      targets:
+        - name: MeleteTests
+        - name: MeleteUITests
