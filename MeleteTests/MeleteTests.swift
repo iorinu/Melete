@@ -65,6 +65,156 @@ final class MeleteTests: XCTestCase {
         XCTAssertNil(MetricInput.parse("", allowsDecimal: true))
     }
 
+    func testWorkoutValueEditingUsesSnapshotRulesAndKeepsDraftsSeparateUntilApply() throws {
+        let metric = MetricDefinition(name: "旧重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "アーカイブ済み種目", metrics: [metric])
+        exercise.isArchived = true
+        let zero = MetricValue(metric: metric, scaledValue: 0)
+        let optional = MetricValue(metric: metric, scaledValue: nil)
+        let set = SetRecord(sortOrder: 1, values: [zero, optional])
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [set])
+        let workout = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [record])
+
+        var drafts = WorkoutValueEditing.drafts(for: workout)
+        XCTAssertEqual(drafts.map(\.text), ["0", ""])
+        XCTAssertTrue(drafts.allSatisfy { $0.name == "旧重量" && $0.unit == "kg" && $0.allowsDecimal && !$0.isRequired })
+        drafts[0].text = "12.345"
+        drafts[1].text = "0"
+        XCTAssertEqual(zero.scaledValue, 0)
+        XCTAssertNil(optional.scaledValue)
+
+        guard case let .success(values) = WorkoutValueEditing.validatedValues(from: drafts) else {
+            return XCTFail("有効な編集値を受け付ける")
+        }
+        XCTAssertEqual(values.first { $0.valueID == zero.id }?.scaledValue, 12_345)
+        XCTAssertEqual(values.first { $0.valueID == optional.id }?.scaledValue, 0)
+        WorkoutValueEditing.apply(values, to: workout)
+        XCTAssertEqual(zero.scaledValue, 12_345)
+        XCTAssertEqual(optional.scaledValue, 0)
+
+        drafts[0].text = "-1"
+        if case .success = WorkoutValueEditing.validatedValues(from: drafts) {
+            XCTFail("負数を拒否する")
+        }
+        var requiredDraft = drafts[0]
+        requiredDraft.text = ""
+        let requiredValue = WorkoutValueEditDraft(
+            valueID: requiredDraft.valueID,
+            exerciseName: requiredDraft.exerciseName,
+            setOrder: requiredDraft.setOrder,
+            name: requiredDraft.name,
+            unit: requiredDraft.unit,
+            allowsDecimal: requiredDraft.allowsDecimal,
+            isRequired: true,
+            text: requiredDraft.text
+        )
+        if case .success = WorkoutValueEditing.validatedValues(from: [requiredValue]) {
+            XCTFail("必須項目の空欄を拒否する")
+        }
+    }
+
+    func testWorkoutValueEditSavePersistsOnlyValuesAndPreservesSnapshotAndHistory() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteWorkoutValueEdit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("WorkoutValueEdit", schema: schema, url: directory.appendingPathComponent("test.store"), cloudKitDatabase: .none)
+        let targetID = UUID()
+        let otherWorkoutID = UUID()
+        let targetValueID: UUID
+
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            let metric = MetricDefinition(name: "旧重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+            let exercise = Exercise(name: "過去の種目名", metrics: [metric])
+            exercise.isArchived = true
+            metric.name = "現在の項目名"
+            metric.unit = "lb"
+            let targetValue = MetricValue(metric: metric, scaledValue: 8_000)
+            targetValue.name = "旧重量"
+            targetValue.unit = "kg"
+            targetValue.allowsDecimal = true
+            targetValue.isRequired = false
+            targetValueID = targetValue.id
+            let secondValue = MetricValue(metric: metric, scaledValue: nil)
+            secondValue.name = "任意項目"
+            secondValue.unit = "回"
+            secondValue.allowsDecimal = false
+            secondValue.isRequired = false
+            let targetSet = SetRecord(sortOrder: 3, values: [targetValue, secondValue])
+            let targetRecord = ExerciseRecord(exercise: exercise, sortOrder: 2, sets: [targetSet])
+            let precedingRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 4_000)])])
+            let target = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [targetRecord, precedingRecord])
+            target.id = targetID
+
+            let otherValue = MetricValue(metric: metric, scaledValue: 20_000)
+            let other = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [otherValue])])])
+            other.id = otherWorkoutID
+            context.insert(exercise)
+            context.insert(target)
+            context.insert(other)
+            try context.save()
+
+            var drafts = WorkoutValueEditing.drafts(for: target)
+            drafts[drafts.firstIndex { $0.valueID == targetValueID }!].text = ""
+            drafts[drafts.firstIndex { $0.name == "任意項目" }!].text = "0"
+            let discardedDraft = WorkoutValueEditing.drafts(for: target)
+            XCTAssertEqual(targetValue.scaledValue, 8_000, "draftを作成・破棄してもモデル値を変えない")
+            XCTAssertEqual(secondValue.scaledValue, nil)
+            if case .failure = WorkoutValueEditing.validatedValues(from: drafts) {
+                XCTFail("任意項目の空欄と0を受け付ける")
+            }
+
+            var invalidDrafts = drafts
+            invalidDrafts[invalidDrafts.firstIndex { $0.valueID == targetValueID }!].text = "1.2345"
+            if case .success = WorkoutValueEditing.validatedValues(from: invalidDrafts) {
+                XCTFail("小数第4位を拒否する")
+            }
+            invalidDrafts[invalidDrafts.firstIndex { $0.valueID == targetValueID }!].text = "1.2"
+            invalidDrafts[invalidDrafts.firstIndex { $0.name == "任意項目" }!].text = "1.5"
+            if case .success = WorkoutValueEditing.validatedValues(from: invalidDrafts) {
+                XCTFail("整数項目は小数を拒否")
+            }
+            XCTAssertEqual(targetValue.scaledValue, 8_000, "入力エラーでは対象のどの値も変更しない")
+            XCTAssertNil(secondValue.scaledValue, "入力エラーでは他の項目値も変更しない")
+
+            // 保存失敗を注入し、対象値を戻しつつ他の未保存変更を維持する。
+            otherValue.scaledValue = 21_000
+            XCTAssertThrowsError(try WorkoutValueEditing.save(drafts, to: target) { throw NSError(domain: "InjectedSaveFailure", code: 1) })
+            XCTAssertEqual(targetValue.scaledValue, 8_000)
+            XCTAssertNil(secondValue.scaledValue)
+            XCTAssertEqual(otherValue.scaledValue, 21_000)
+            XCTAssertEqual(drafts.first { $0.valueID == targetValueID }?.text, "", "失敗後も編集入力を保持する")
+            XCTAssertEqual(discardedDraft.first { $0.valueID == targetValueID }?.text, "8", "破棄したdraftの値はモデルに反映しない")
+
+            try WorkoutValueEditing.save(drafts, to: target) { try context.save() }
+        }
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let workouts = try reopenedContext.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(workouts.map(\.id)), [targetID, otherWorkoutID])
+        let savedWorkout = try XCTUnwrap(workouts.first { $0.id == targetID })
+        XCTAssertEqual(savedWorkout.records.sorted { $0.sortOrder < $1.sortOrder }.map(\.sortOrder), [0, 2])
+        let record = try XCTUnwrap(savedWorkout.records.first { $0.sortOrder == 2 })
+        XCTAssertEqual(record.exerciseName, "過去の種目名")
+        XCTAssertEqual(record.sortOrder, 2)
+        let set = try XCTUnwrap(record.sets.first)
+        XCTAssertEqual(set.sortOrder, 3)
+        let savedEditedValue = try XCTUnwrap(set.values.first { $0.id == targetValueID })
+        XCTAssertNil(savedEditedValue.scaledValue, "任意の既存値を空にする")
+        XCTAssertEqual(savedEditedValue.name, "旧重量")
+        XCTAssertEqual(savedEditedValue.unit, "kg")
+        XCTAssertTrue(savedEditedValue.allowsDecimal)
+        XCTAssertFalse(savedEditedValue.isRequired)
+        XCTAssertEqual(set.values.first { $0.name == "任意項目" }?.scaledValue, 0, "nilを0にする")
+        let otherWorkout = try XCTUnwrap(workouts.first { $0.id == otherWorkoutID })
+        XCTAssertEqual(otherWorkout.records.first?.sets.first?.values.first?.scaledValue, 21_000)
+        let archivedExercise = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Exercise>()).first)
+        XCTAssertTrue(archivedExercise.isArchived)
+        XCTAssertEqual(archivedExercise.name, "過去の種目名")
+    }
+
     func testWorkoutDayIsStableAcrossTimeZones() {
         let cases: [(String, Int, Int, Int, Int)] = [
             ("Pacific/Kiritimati", 2026, 11, 14, 0),

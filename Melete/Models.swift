@@ -25,6 +25,101 @@ enum WorkoutDeletionError: LocalizedError {
     }
 }
 
+struct WorkoutValueEditDraft {
+    let valueID: UUID
+    let exerciseName: String
+    let setOrder: Int
+    let name: String
+    let unit: String
+    let allowsDecimal: Bool
+    let isRequired: Bool
+    var text: String
+
+    var id: UUID { valueID }
+}
+
+struct ValidatedWorkoutValue {
+    let valueID: UUID
+    let scaledValue: Int64?
+}
+
+enum WorkoutValueEditing {
+    static func drafts(for workout: Workout) -> [WorkoutValueEditDraft] {
+        workout.records.sorted { $0.sortOrder < $1.sortOrder }.flatMap { record in
+            record.sets.sorted { $0.sortOrder < $1.sortOrder }.flatMap { set in
+                set.values.map { value in
+                    WorkoutValueEditDraft(
+                        valueID: value.id,
+                        exerciseName: record.exerciseName,
+                        setOrder: set.sortOrder,
+                        name: value.name,
+                        unit: value.unit,
+                        allowsDecimal: value.allowsDecimal,
+                        isRequired: value.isRequired,
+                        text: value.scaledValue.map { NSDecimalNumber(decimal: Decimal($0) / Decimal(1000)).stringValue } ?? ""
+                    )
+                }
+            }
+        }
+    }
+
+    static func validatedValues(from drafts: [WorkoutValueEditDraft]) -> Result<[ValidatedWorkoutValue], WorkoutValueEditError> {
+        var values: [ValidatedWorkoutValue] = []
+        for draft in drafts {
+            let raw = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parsed = raw.isEmpty ? nil : MetricInput.parse(raw, allowsDecimal: draft.allowsDecimal)
+            guard raw.isEmpty || parsed != nil else {
+                return .failure(.invalid(exerciseName: draft.exerciseName, setOrder: draft.setOrder, metricName: draft.name))
+            }
+            guard !draft.isRequired || parsed != nil else {
+                return .failure(.required(exerciseName: draft.exerciseName, setOrder: draft.setOrder, metricName: draft.name))
+            }
+            values.append(ValidatedWorkoutValue(valueID: draft.valueID, scaledValue: parsed))
+        }
+        return .success(values)
+    }
+
+    static func apply(_ values: [ValidatedWorkoutValue], to workout: Workout) {
+        let modelValues = workout.records.flatMap({ $0.sets }).flatMap(\.values)
+        for edit in values {
+            if let value = modelValues.first(where: { $0.id == edit.valueID }) {
+                value.scaledValue = edit.scaledValue
+            }
+        }
+    }
+
+    static func save(_ drafts: [WorkoutValueEditDraft], to workout: Workout, persist: () throws -> Void) throws {
+        guard case let .success(values) = validatedValues(from: drafts) else {
+            throw WorkoutValueEditError.invalidDrafts
+        }
+        let originalValues = workout.records.flatMap { $0.sets }.flatMap(\.values).map { ($0.id, $0.scaledValue) }
+        apply(values, to: workout)
+        do {
+            try persist()
+        } catch {
+            let modelValues = workout.records.flatMap({ $0.sets }).flatMap(\.values)
+            for (valueID, original) in originalValues {
+                modelValues.first(where: { $0.id == valueID })?.scaledValue = original
+            }
+            throw error
+        }
+    }
+}
+
+enum WorkoutValueEditError: LocalizedError {
+    case invalid(exerciseName: String, setOrder: Int, metricName: String)
+    case required(exerciseName: String, setOrder: Int, metricName: String)
+    case invalidDrafts
+
+    var errorDescription: String? {
+        switch self {
+        case let .invalid(exercise, set, metric): "\(exercise)・セット\(set)の「\(metric)」は0以上の有効な数値を入力してください。"
+        case let .required(exercise, set, metric): "\(exercise)・セット\(set)の「\(metric)」は必須です。"
+        case .invalidDrafts: "入力値を確認してください。"
+        }
+    }
+}
+
 enum MeleteSchemaV1: VersionedSchema {
     static var versionIdentifier = Schema.Version(1, 0, 0)
     static var models: [ any PersistentModel.Type ] {

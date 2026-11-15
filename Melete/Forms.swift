@@ -256,3 +256,84 @@ struct WorkoutForm: View {
     }
 
 }
+
+struct WorkoutValueEditForm: View {
+    @Environment(\.dismiss) private var dismiss
+    let workout: Workout
+    var onSave: ([WorkoutValueEditDraft]) -> String?
+    @State private var drafts: [WorkoutValueEditDraft]
+    @State private var validationError: String?
+
+    init(workout: Workout, onSave: @escaping ([WorkoutValueEditDraft]) -> String?) {
+        self.workout = workout
+        self.onSave = onSave
+        _drafts = State(initialValue: WorkoutValueEditing.drafts(for: workout))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("記録を編集").font(.system(.title, design: .rounded).weight(.bold))
+                Text("編集対象: \(displayDay(workout.day))")
+                    .font(.headline)
+                Text("既存の数値だけを編集できます。日付・種目・セットの追加や削除はできません。")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+            Form {
+                ForEach(workout.records.sorted { $0.sortOrder < $1.sortOrder }) { record in
+                    Section(record.exerciseName) {
+                        ForEach(record.sets.sorted { $0.sortOrder < $1.sortOrder }) { set in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("セット \(set.sortOrder)").font(.headline)
+                                ForEach(drafts.indices.filter { index in
+                                    set.values.contains { $0.id == drafts[index].valueID }
+                                }, id: \.self) { index in
+                                    HStack {
+                                        Text("\(drafts[index].name)（\(drafts[index].unit)）\(drafts[index].isRequired ? "*" : "")")
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        TextField(drafts[index].allowsDecimal ? "小数第3位まで" : "0以上の整数", text: $drafts[index].text)
+                                            .frame(minWidth: 100, maxWidth: 180)
+                                            .textFieldStyle(.roundedBorder)
+                                            .accessibilityLabel("\(drafts[index].name)（\(drafts[index].unit)）\(drafts[index].isRequired ? "必須" : "任意")")
+                                            .accessibilityIdentifier("edit_set\(set.sortOrder)_metric_\(drafts[index].name)")
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+            }
+            if let validationError { Text(validationError).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("キャンセル") { dismiss() }
+                Button("保存") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("saveWorkoutEditsButton")
+            }
+        }
+        .padding(26)
+        .frame(minWidth: 620, idealWidth: 680, minHeight: 500, idealHeight: 620)
+        .tint(FormStyle.accent)
+    }
+
+    private func save() {
+        switch WorkoutValueEditing.validatedValues(from: drafts) {
+        case .failure(let error):
+            validationError = error.localizedDescription
+        case .success:
+            if let error = onSave(drafts) {
+                validationError = error
+            } else {
+                dismiss()
+            }
+        }
+    }
+
+    private func displayDay(_ day: String) -> String {
+        let components = day.split(separator: "-").compactMap { Int($0) }
+        guard components.count == 3 else { return day }
+        return "\(components[0])年\(components[1])月\(components[2])日"
+    }
+}

@@ -44,6 +44,7 @@ struct MainView: View {
     @State private var showingExerciseForm = false
     @State private var showingWorkoutForm = false
     @State private var pendingWorkoutDeletion: Workout?
+    @State private var editingWorkout: Workout?
     @State private var errorMessage: String?
     @State private var displayedMonth = Calendar(identifier: .gregorian).dateInterval(of: .month, for: .now)?.start ?? .now
     @State private var selectedWorkoutDay: String?
@@ -99,6 +100,11 @@ struct MainView: View {
         .sheet(isPresented: $showingWorkoutForm) {
             WorkoutForm(exercises: exercises.filter { !$0.isArchived }) { day, entries in
                 saveWorkout(day: day, entries: entries)
+            }
+        }
+        .sheet(item: $editingWorkout) { workout in
+            WorkoutValueEditForm(workout: workout) { drafts in
+                saveWorkoutEdits(workout: workout, drafts: drafts)
             }
         }
         .alert("操作できませんでした", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
@@ -236,6 +242,10 @@ struct MainView: View {
                                 HStack {
                                     Text(Self.displayDay(workout.day)).font(.system(.title2, design: .rounded).weight(.bold))
                                     Spacer()
+                                    Button("編集", systemImage: "pencil") {
+                                        editingWorkout = workout
+                                    }
+                                    .accessibilityIdentifier("editWorkout_\(workout.id.uuidString)")
                                     Button(role: .destructive) {
                                         pendingWorkoutDeletion = workout
                                     } label: {
@@ -467,6 +477,15 @@ struct MainView: View {
         context.insert(Workout(day: day, records: records))
         do { try context.save(); return true }
         catch { context.rollback(); errorMessage = error.localizedDescription; return false }
+    }
+
+    private func saveWorkoutEdits(workout: Workout, drafts: [WorkoutValueEditDraft]) -> String? {
+        do {
+            try WorkoutValueEditing.save(drafts, to: workout) { try context.save() }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     private func confirmWorkoutDeletion() {
