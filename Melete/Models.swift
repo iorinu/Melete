@@ -1,6 +1,31 @@
 import Foundation
 import SwiftData
 
+enum ExerciseNameEditing {
+    static func validatedName(_ name: String) -> String? {
+        let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    static func save(_ name: String, for exercise: Exercise, persist: () throws -> Void) throws {
+        guard let cleaned = validatedName(name) else { throw ExerciseNameEditError.emptyName }
+        let originalName = exercise.name
+        exercise.name = cleaned
+        do {
+            try persist()
+        } catch {
+            exercise.name = originalName
+            throw error
+        }
+    }
+}
+
+enum ExerciseNameEditError: LocalizedError {
+    case emptyName
+
+    var errorDescription: String? { "種目名を入力してください。" }
+}
+
 enum WorkoutDeletion {
     static func delete(workoutID: UUID, in context: ModelContext) throws {
         let descriptor = FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })

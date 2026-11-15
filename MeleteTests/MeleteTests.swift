@@ -3,6 +3,111 @@ import SwiftData
 @testable import Melete
 
 final class MeleteTests: XCTestCase {
+    func testExerciseNameEditingTrimsRejectsEmptyAndAllowsDuplicateNames() throws {
+        XCTAssertEqual(ExerciseNameEditing.validatedName("  ベンチプレス \n"), "ベンチプレス")
+        XCTAssertNil(ExerciseNameEditing.validatedName(" \n\t"))
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteExerciseNameEdit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("ExerciseNameEdit", schema: schema, url: directory.appendingPathComponent("test.store"), cloudKitDatabase: .none)
+        let inUseID = UUID()
+        let archivedID = UUID()
+        let inUseCreatedAt: Date
+        let archivedCreatedAt: Date
+        let metricID: UUID
+        let oldRecordID: UUID
+
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: false, isRequired: true, sortOrder: 0)
+            metricID = metric.id
+            let inUse = Exercise(name: "使用中", metrics: [metric])
+            inUse.id = inUseID
+            inUseCreatedAt = inUse.createdAt
+            let archivedMetric = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 0)
+            let archived = Exercise(name: "アーカイブ済み", metrics: [archivedMetric])
+            archived.id = archivedID
+            archived.isArchived = true
+            archivedCreatedAt = archived.createdAt
+            let oldValue = MetricValue(metric: metric, scaledValue: 50_000)
+            let oldSet = SetRecord(sortOrder: 1, values: [oldValue])
+            let oldRecord = ExerciseRecord(exercise: inUse, sortOrder: 0, sets: [oldSet])
+            oldRecordID = oldRecord.id
+            context.insert(inUse)
+            context.insert(archived)
+            context.insert(Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [oldRecord]))
+            try context.save()
+
+            XCTAssertThrowsError(try ExerciseNameEditing.save(" \n", for: inUse) { try context.save() })
+            XCTAssertEqual(inUse.name, "使用中", "空白名を拒否してモデル名を維持する")
+            XCTAssertNoThrow(try ExerciseNameEditing.save(" 使用中 ", for: archived) { try context.save() })
+            XCTAssertNoThrow(try ExerciseNameEditing.save(" 新名称 \n", for: inUse) { try context.save() })
+            XCTAssertEqual(inUse.name, "新名称")
+
+            let duplicate = Exercise(name: "重複可", metrics: [])
+            context.insert(duplicate)
+            try context.save()
+            XCTAssertNoThrow(try ExerciseNameEditing.save(" 重複可 ", for: inUse) { try context.save() })
+            XCTAssertEqual(inUse.name, duplicate.name, "重複名を許可する")
+            try ExerciseNameEditing.save(" 新名称 ", for: inUse) { try context.save() }
+
+            let other = Exercise(name: "別種目", metrics: [])
+            context.insert(other)
+            try context.save()
+            other.name = "他の未保存変更"
+            XCTAssertThrowsError(try ExerciseNameEditing.save("保存失敗後", for: inUse) {
+                throw NSError(domain: "InjectedSaveFailure", code: 1)
+            })
+            XCTAssertEqual(inUse.name, "新名称", "失敗時に対象名だけ復元する")
+            XCTAssertEqual(other.name, "他の未保存変更", "別モデルの未保存変更を保持する")
+            let retainedInput = "保存失敗後"
+            XCTAssertNoThrow(try ExerciseNameEditing.save(retainedInput, for: inUse) { try context.save() })
+            XCTAssertEqual(inUse.name, retainedInput, "同じ入力で再試行できる")
+        }
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let exercises = try reopenedContext.fetch(FetchDescriptor<Exercise>())
+        let savedInUse = try XCTUnwrap(exercises.first { $0.id == inUseID })
+        let savedArchived = try XCTUnwrap(exercises.first { $0.id == archivedID })
+        XCTAssertEqual(savedInUse.name, "保存失敗後")
+        XCTAssertEqual(savedInUse.createdAt, inUseCreatedAt)
+        XCTAssertFalse(savedInUse.isArchived)
+        XCTAssertEqual(savedInUse.metrics.map(\.id), [metricID])
+        XCTAssertEqual(savedArchived.name, "使用中")
+        XCTAssertEqual(savedArchived.createdAt, archivedCreatedAt)
+        XCTAssertTrue(savedArchived.isArchived)
+        let workout = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first)
+        let oldRecord = try XCTUnwrap(workout.records.first { $0.id == oldRecordID })
+        XCTAssertEqual(oldRecord.exerciseName, "使用中", "既存Workoutのスナップショット名を維持する")
+        XCTAssertEqual(oldRecord.sets.first?.values.first?.scaledValue, 50_000, "既存Workoutの値を維持する")
+        let newRecord = ExerciseRecord(exercise: savedInUse, sortOrder: 1, sets: [])
+        XCTAssertEqual(newRecord.exerciseName, "保存失敗後", "新規Workout記録には変更後の名前を使う")
+    }
+
+    func testExerciseNameEditingRestoresOnlyTargetNameAfterSaveFailure() throws {
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: false, isRequired: true, sortOrder: 0)
+        let exercise = Exercise(name: "旧名", metrics: [metric])
+        exercise.isArchived = true
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [])
+        let workout = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [record])
+        let other = Exercise(name: "別種目", metrics: [])
+        other.name = "未保存の変更"
+
+        XCTAssertThrowsError(try ExerciseNameEditing.save("新名", for: exercise) {
+            throw NSError(domain: "InjectedSaveFailure", code: 1)
+        })
+        XCTAssertEqual(exercise.name, "旧名")
+        XCTAssertEqual(other.name, "未保存の変更")
+        XCTAssertEqual(exercise.id, record.exerciseID)
+        XCTAssertEqual(exercise.isArchived, true)
+        XCTAssertEqual(record.exerciseName, "旧名")
+        XCTAssertEqual(workout.records.first?.exerciseName, "旧名")
+    }
+
     func testUITestStoreSelectionRequiresValidOwnedPath() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteIsolationTests-\(UUID().uuidString)", isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

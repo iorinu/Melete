@@ -82,6 +82,53 @@ struct ExerciseForm: View {
     }
 }
 
+struct ExerciseNameEditForm: View {
+    @Environment(\.dismiss) private var dismiss
+    let exercise: Exercise
+    var onSave: (String) -> String?
+    @State private var name: String
+    @State private var validationError: String?
+
+    init(exercise: Exercise, onSave: @escaping (String) -> String?) {
+        self.exercise = exercise
+        self.onSave = onSave
+        _name = State(initialValue: exercise.name)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("種目名を編集").font(.system(.title, design: .rounded).weight(.bold))
+                Text("過去の運動記録には、記録当時の種目名が残ります。")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+            Form {
+                Section("基本情報") {
+                    TextField("種目名", text: $name).accessibilityIdentifier("editExerciseNameField")
+                }
+            }
+            if let validationError { Text(validationError).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("キャンセル") { dismiss() }
+                Button("保存") {
+                    guard let cleaned = ExerciseNameEditing.validatedName(name) else {
+                        validationError = ExerciseNameEditError.emptyName.localizedDescription
+                        return
+                    }
+                    guard let error = onSave(cleaned) else { dismiss(); return }
+                    validationError = error
+                }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("saveExerciseNameButton")
+            }
+        }
+        .padding(26)
+        .frame(minWidth: 500, idealWidth: 570, minHeight: 250, idealHeight: 300)
+        .tint(FormStyle.accent)
+    }
+}
+
 struct WorkoutEntryDraft: Identifiable {
     let id = UUID()
     let exercise: Exercise

@@ -67,6 +67,7 @@ struct MainView: View {
     @State private var selection: String? = "ホーム"
     @FocusState private var focusedSection: String?
     @State private var showingExerciseForm = false
+    @State private var editingExercise: Exercise?
     @State private var showingWorkoutForm = false
     @State private var pendingWorkoutDeletion: Workout?
     @State private var editingWorkout: Workout?
@@ -121,6 +122,9 @@ struct MainView: View {
         .tint(MeleteStyle.accent)
         .sheet(isPresented: $showingExerciseForm) {
             ExerciseForm { name, metrics in saveExercise(name: name, metrics: metrics) }
+        }
+        .sheet(item: $editingExercise) { exercise in
+            ExerciseNameEditForm(exercise: exercise) { name in saveExerciseName(name, for: exercise) }
         }
         .sheet(isPresented: $showingWorkoutForm) {
             WorkoutForm(
@@ -477,6 +481,7 @@ struct MainView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button("名前を編集", systemImage: "pencil") { editingExercise = exercise }
             Button(exercise.isArchived ? "復帰" : "アーカイブ") {
                 do {
                     exercise.isArchived.toggle()
@@ -513,6 +518,15 @@ struct MainView: View {
         context.insert(Exercise(name: name, metrics: definitions))
         do { try context.save(); return true }
         catch { context.rollback(); errorMessage = error.localizedDescription; return false }
+    }
+
+    private func saveExerciseName(_ name: String, for exercise: Exercise) -> String? {
+        do {
+            try ExerciseNameEditing.save(name, for: exercise) { try context.save() }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     private func saveWorkout(day: Date, entries: [WorkoutEntryDraft]) -> Bool {
