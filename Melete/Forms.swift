@@ -260,26 +260,30 @@ struct WorkoutForm: View {
 struct WorkoutValueEditForm: View {
     @Environment(\.dismiss) private var dismiss
     let workout: Workout
-    var onSave: ([WorkoutValueEditDraft]) -> String?
+    var onSave: (Date, [WorkoutValueEditDraft]) -> String?
     @State private var drafts: [WorkoutValueEditDraft]
+    @State private var day: Date
     @State private var validationError: String?
 
-    init(workout: Workout, onSave: @escaping ([WorkoutValueEditDraft]) -> String?) {
+    init(workout: Workout, onSave: @escaping (Date, [WorkoutValueEditDraft]) -> String?) {
         self.workout = workout
         self.onSave = onSave
         _drafts = State(initialValue: WorkoutValueEditing.drafts(for: workout))
+        let storedDay = WorkoutValueEditing.date(from: workout.day)
+        _day = State(initialValue: storedDay ?? Calendar.current.startOfDay(for: .now))
+        _validationError = State(initialValue: storedDay == nil ? WorkoutValueEditError.invalidStoredDay.localizedDescription : nil)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("記録を編集").font(.system(.title, design: .rounded).weight(.bold))
-                Text("編集対象: \(displayDay(workout.day))")
-                    .font(.headline)
-                Text("既存の数値だけを編集できます。日付・種目・セットの追加や削除はできません。")
+                Text("既存の日付と数値を編集できます。種目・セットの追加や削除はできません。")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
             Form {
+                DatePicker("運動日", selection: $day, in: ...Date.now, displayedComponents: .date)
+                    .disabled(WorkoutValueEditing.date(from: workout.day) == nil)
                 ForEach(workout.records.sorted { $0.sortOrder < $1.sortOrder }) { record in
                     Section(record.exerciseName) {
                         ForEach(record.sets.sorted { $0.sortOrder < $1.sortOrder }) { set in
@@ -311,6 +315,7 @@ struct WorkoutValueEditForm: View {
                 Button("保存") { save() }
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("saveWorkoutEditsButton")
+                    .disabled(WorkoutValueEditing.date(from: workout.day) == nil)
             }
         }
         .padding(26)
@@ -319,11 +324,16 @@ struct WorkoutValueEditForm: View {
     }
 
     private func save() {
+        guard WorkoutValueEditing.date(from: workout.day) != nil else {
+            validationError = WorkoutValueEditError.invalidStoredDay.localizedDescription
+            return
+        }
+
         switch WorkoutValueEditing.validatedValues(from: drafts) {
         case .failure(let error):
             validationError = error.localizedDescription
         case .success:
-            if let error = onSave(drafts) {
+            if let error = onSave(day, drafts) {
                 validationError = error
             } else {
                 dismiss()
@@ -331,9 +341,4 @@ struct WorkoutValueEditForm: View {
         }
     }
 
-    private func displayDay(_ day: String) -> String {
-        let components = day.split(separator: "-").compactMap { Int($0) }
-        guard components.count == 3 else { return day }
-        return "\(components[0])年\(components[1])月\(components[2])日"
-    }
 }

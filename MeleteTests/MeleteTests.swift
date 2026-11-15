@@ -121,6 +121,14 @@ final class MeleteTests: XCTestCase {
         let targetID = UUID()
         let otherWorkoutID = UUID()
         let targetValueID: UUID
+        let otherOriginalDay: String
+        let targetCreatedAt: Date
+        let recordCreatedAt: Date
+        var testCalendar = Calendar(identifier: .gregorian)
+        testCalendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))
+        let fixedNow = try XCTUnwrap(testCalendar.date(from: DateComponents(year: 2026, month: 11, day: 15, hour: 12)))
+        let editedDay = try XCTUnwrap(testCalendar.date(from: DateComponents(year: 2024, month: 2, day: 29, hour: 18)))
+        let editedDayString = Workout.dayString(from: editedDay, calendar: testCalendar)
 
         do {
             let container = try ModelContainer(for: schema, configurations: [configuration])
@@ -146,10 +154,13 @@ final class MeleteTests: XCTestCase {
             let precedingRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 4_000)])])
             let target = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [targetRecord, precedingRecord])
             target.id = targetID
+            targetCreatedAt = target.createdAt
+            recordCreatedAt = targetSet.createdAt
 
             let otherValue = MetricValue(metric: metric, scaledValue: 20_000)
             let other = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [otherValue])])])
             other.id = otherWorkoutID
+            otherOriginalDay = other.day
             context.insert(exercise)
             context.insert(target)
             context.insert(other)
@@ -180,14 +191,18 @@ final class MeleteTests: XCTestCase {
 
             // 保存失敗を注入し、対象値を戻しつつ他の未保存変更を維持する。
             otherValue.scaledValue = 21_000
-            XCTAssertThrowsError(try WorkoutValueEditing.save(drafts, to: target) { throw NSError(domain: "InjectedSaveFailure", code: 1) })
+            let originalDay = target.day
+            XCTAssertThrowsError(try WorkoutValueEditing.save(drafts, day: editedDay, to: target, calendar: testCalendar, now: fixedNow) { throw NSError(domain: "InjectedSaveFailure", code: 1) })
             XCTAssertEqual(targetValue.scaledValue, 8_000)
             XCTAssertNil(secondValue.scaledValue)
+            XCTAssertEqual(target.day, originalDay, "保存失敗時は日付も復元する")
             XCTAssertEqual(otherValue.scaledValue, 21_000)
             XCTAssertEqual(drafts.first { $0.valueID == targetValueID }?.text, "", "失敗後も編集入力を保持する")
             XCTAssertEqual(discardedDraft.first { $0.valueID == targetValueID }?.text, "8", "破棄したdraftの値はモデルに反映しない")
 
-            try WorkoutValueEditing.save(drafts, to: target) { try context.save() }
+            try WorkoutValueEditing.save(drafts, day: editedDay, to: target, calendar: testCalendar, now: fixedNow) { try context.save() }
+            XCTAssertEqual(target.createdAt, targetCreatedAt)
+            XCTAssertEqual(targetSet.createdAt, recordCreatedAt)
         }
 
         let reopened = try ModelContainer(for: schema, configurations: [configuration])
@@ -195,12 +210,15 @@ final class MeleteTests: XCTestCase {
         let workouts = try reopenedContext.fetch(FetchDescriptor<Workout>())
         XCTAssertEqual(Set(workouts.map(\.id)), [targetID, otherWorkoutID])
         let savedWorkout = try XCTUnwrap(workouts.first { $0.id == targetID })
+        XCTAssertEqual(savedWorkout.day, editedDayString)
+        XCTAssertEqual(savedWorkout.createdAt, targetCreatedAt)
         XCTAssertEqual(savedWorkout.records.sorted { $0.sortOrder < $1.sortOrder }.map(\.sortOrder), [0, 2])
         let record = try XCTUnwrap(savedWorkout.records.first { $0.sortOrder == 2 })
         XCTAssertEqual(record.exerciseName, "過去の種目名")
         XCTAssertEqual(record.sortOrder, 2)
         let set = try XCTUnwrap(record.sets.first)
         XCTAssertEqual(set.sortOrder, 3)
+        XCTAssertEqual(set.createdAt, recordCreatedAt)
         let savedEditedValue = try XCTUnwrap(set.values.first { $0.id == targetValueID })
         XCTAssertNil(savedEditedValue.scaledValue, "任意の既存値を空にする")
         XCTAssertEqual(savedEditedValue.name, "旧重量")
@@ -209,10 +227,72 @@ final class MeleteTests: XCTestCase {
         XCTAssertFalse(savedEditedValue.isRequired)
         XCTAssertEqual(set.values.first { $0.name == "任意項目" }?.scaledValue, 0, "nilを0にする")
         let otherWorkout = try XCTUnwrap(workouts.first { $0.id == otherWorkoutID })
+        XCTAssertEqual(otherWorkout.day, otherOriginalDay, "別Workoutの日付を変更しない")
         XCTAssertEqual(otherWorkout.records.first?.sets.first?.values.first?.scaledValue, 21_000)
         let archivedExercise = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Exercise>()).first)
         XCTAssertTrue(archivedExercise.isArchived)
         XCTAssertEqual(archivedExercise.name, "過去の種目名")
+    }
+
+    func testWorkoutValueEditingRejectsInvalidDayOrDraftWithoutPartialChanges() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 15, hour: 12)))
+        let originalDate = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 14)))
+        let futureDate = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 16)))
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "テスト種目", metrics: [metric])
+        let value = MetricValue(metric: metric, scaledValue: 5_000)
+        let workout = Workout(day: originalDate, records: [ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [value])])], calendar: calendar)
+        var drafts = WorkoutValueEditing.drafts(for: workout)
+        drafts[0].text = "7"
+
+        XCTAssertThrowsError(try WorkoutValueEditing.save(drafts, day: futureDate, to: workout, calendar: calendar, now: now) {})
+        XCTAssertEqual(workout.day, "2026-11-14")
+        XCTAssertEqual(value.scaledValue, 5_000)
+
+        workout.day = "2026-02-30"
+        XCTAssertThrowsError(try WorkoutValueEditing.save(drafts, day: originalDate, to: workout, calendar: calendar, now: now) {})
+        XCTAssertEqual(workout.day, "2026-02-30", "壊れた保存日付は編集で上書きしない")
+        XCTAssertEqual(value.scaledValue, 5_000)
+        workout.day = "2026-11-14"
+
+        drafts[0].text = "invalid"
+        XCTAssertThrowsError(try WorkoutValueEditing.save(drafts, day: originalDate, to: workout, calendar: calendar, now: now) {})
+        XCTAssertEqual(workout.day, "2026-11-14")
+        XCTAssertEqual(value.scaledValue, 5_000)
+
+        drafts[0].text = ""
+        XCTAssertNoThrow(try WorkoutValueEditing.save(drafts, day: originalDate, to: workout, calendar: calendar, now: now) {})
+        XCTAssertNil(value.scaledValue, "任意項目を空欄にした場合は値を消し、日付は一緒に扱う")
+        XCTAssertEqual(workout.day, "2026-11-14")
+    }
+
+    func testWorkoutStoredDayRejectsMalformedAndImpossibleDates() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Pacific/Honolulu"))
+        for invalid in ["2024-2-09", "2024-02-30", "2023-02-29", "abcd-01-01", "2024-01-01x"] {
+            XCTAssertNil(WorkoutValueEditing.date(from: invalid, calendar: calendar), "不正日付を拒否: \(invalid)")
+        }
+        let leap = try XCTUnwrap(WorkoutValueEditing.date(from: "2024-02-29", calendar: calendar))
+        XCTAssertEqual(Workout.dayString(from: leap, calendar: calendar), "2024-02-29")
+    }
+
+    func testWorkoutDayConversionUsesCalendarDaysAcrossZonesDSTLeapDayAndYearEnd() throws {
+        let cases: [(String, DateComponents, String)] = [
+            ("Asia/Tokyo", DateComponents(year: 2024, month: 2, day: 29, hour: 23), "2024-02-29"),
+            ("Pacific/Honolulu", DateComponents(year: 2024, month: 3, day: 10, hour: 23), "2024-03-10"),
+            ("America/Los_Angeles", DateComponents(year: 2024, month: 3, day: 10, hour: 3), "2024-03-10"),
+            ("Asia/Tokyo", DateComponents(year: 2025, month: 12, day: 31, hour: 23), "2025-12-31"),
+            ("Asia/Tokyo", DateComponents(year: 2026, month: 1, day: 1, hour: 0), "2026-01-01")
+        ]
+        for (zone, components, expected) in cases {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = try XCTUnwrap(TimeZone(identifier: zone))
+            let date = try XCTUnwrap(calendar.date(from: components))
+            XCTAssertEqual(Workout.dayString(from: date, calendar: calendar), expected, "\(zone) \(expected)")
+            XCTAssertEqual(WorkoutValueEditing.date(from: expected, calendar: calendar).map { Workout.dayString(from: $0, calendar: calendar) }, expected)
+        }
     }
 
     func testWorkoutDayIsStableAcrossTimeZones() {

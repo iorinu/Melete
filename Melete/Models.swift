@@ -44,6 +44,15 @@ struct ValidatedWorkoutValue {
 }
 
 enum WorkoutValueEditing {
+    static func date(from day: String, calendar: Calendar = .current) -> Date? {
+        let parts = day.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,
+              let year = Int(parts[0]), let month = Int(parts[1]), let dayOfMonth = Int(parts[2]),
+              let date = calendar.date(from: DateComponents(year: year, month: month, day: dayOfMonth)),
+              Workout.dayString(from: date, calendar: calendar) == day else { return nil }
+        return date
+    }
+
     static func drafts(for workout: Workout) -> [WorkoutValueEditDraft] {
         workout.records.sorted { $0.sortOrder < $1.sortOrder }.flatMap { record in
             record.sets.sorted { $0.sortOrder < $1.sortOrder }.flatMap { set in
@@ -88,11 +97,16 @@ enum WorkoutValueEditing {
         }
     }
 
-    static func save(_ drafts: [WorkoutValueEditDraft], to workout: Workout, persist: () throws -> Void) throws {
+    static func save(_ drafts: [WorkoutValueEditDraft], day: Date, to workout: Workout, calendar: Calendar = .current, now: Date = .now, persist: () throws -> Void) throws {
         guard case let .success(values) = validatedValues(from: drafts) else {
             throw WorkoutValueEditError.invalidDrafts
         }
+        guard calendar.startOfDay(for: day) <= calendar.startOfDay(for: now) else { throw WorkoutValueEditError.futureDay }
+        guard Self.date(from: workout.day, calendar: calendar) != nil else { throw WorkoutValueEditError.invalidStoredDay }
+        let originalDay = workout.day
+        let newDay = Workout.dayString(from: day, calendar: calendar)
         let originalValues = workout.records.flatMap { $0.sets }.flatMap(\.values).map { ($0.id, $0.scaledValue) }
+        workout.day = newDay
         apply(values, to: workout)
         do {
             try persist()
@@ -101,6 +115,7 @@ enum WorkoutValueEditing {
             for (valueID, original) in originalValues {
                 modelValues.first(where: { $0.id == valueID })?.scaledValue = original
             }
+            workout.day = originalDay
             throw error
         }
     }
@@ -110,12 +125,16 @@ enum WorkoutValueEditError: LocalizedError {
     case invalid(exerciseName: String, setOrder: Int, metricName: String)
     case required(exerciseName: String, setOrder: Int, metricName: String)
     case invalidDrafts
+    case invalidStoredDay
+    case futureDay
 
     var errorDescription: String? {
         switch self {
         case let .invalid(exercise, set, metric): "\(exercise)・セット\(set)の「\(metric)」は0以上の有効な数値を入力してください。"
         case let .required(exercise, set, metric): "\(exercise)・セット\(set)の「\(metric)」は必須です。"
         case .invalidDrafts: "入力値を確認してください。"
+        case .invalidStoredDay: "保存済みの運動日が不正なため、編集できません。"
+        case .futureDay: "運動日は今日以前の日付を選択してください。"
         }
     }
 }
