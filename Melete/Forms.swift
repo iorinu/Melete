@@ -98,10 +98,16 @@ struct WorkoutForm: View {
     @Environment(\.dismiss) private var dismiss
     let exercises: [Exercise]
     var onSave: (Date, [WorkoutEntryDraft]) -> Bool
-    @State private var day = Calendar.current.startOfDay(for: .now)
+    @State private var day: Date
     @State private var entries: [WorkoutEntryDraft] = []
     @State private var selectedExerciseID: UUID?
     @State private var validationError: String?
+
+    init(exercises: [Exercise], initialDay: Date? = nil, onSave: @escaping (Date, [WorkoutEntryDraft]) -> Bool) {
+        self.exercises = exercises
+        self.onSave = onSave
+        _day = State(initialValue: Calendar.current.startOfDay(for: initialDay ?? .now))
+    }
 
     @ViewBuilder
     private func formHeading(eyebrow: String, title: String, subtitle: String) -> some View {

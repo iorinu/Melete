@@ -6,6 +6,31 @@ private enum MeleteStyle {
 }
 
 enum WorkoutCalendarLogic {
+    enum AddWorkoutBlock: Equatable {
+        case noActiveExercises
+        case futureDay
+        case invalidSelectedDay
+    }
+
+    static func initialWorkoutDay(selectedDay: String?, now: Date, calendar: Calendar) -> Date? {
+        guard let selectedDay else { return calendar.startOfDay(for: now) }
+        guard let date = WorkoutValueEditing.date(from: selectedDay, calendar: calendar) else { return nil }
+        return calendar.startOfDay(for: date)
+    }
+
+    static func addWorkoutBlocks(activeExerciseCount: Int, selectedDay: String?, now: Date, calendar: Calendar) -> [AddWorkoutBlock] {
+        var blocks: [AddWorkoutBlock] = []
+        if activeExerciseCount == 0 { blocks.append(.noActiveExercises) }
+        if let selectedDay {
+            guard let date = WorkoutValueEditing.date(from: selectedDay, calendar: calendar) else {
+                blocks.append(.invalidSelectedDay)
+                return blocks
+            }
+            if calendar.startOfDay(for: date) > calendar.startOfDay(for: now) { blocks.append(.futureDay) }
+        }
+        return blocks
+    }
+
     static func calendar(timeZone: TimeZone) -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
@@ -98,7 +123,10 @@ struct MainView: View {
             ExerciseForm { name, metrics in saveExercise(name: name, metrics: metrics) }
         }
         .sheet(isPresented: $showingWorkoutForm) {
-            WorkoutForm(exercises: exercises.filter { !$0.isArchived }) { day, entries in
+            WorkoutForm(
+                exercises: exercises.filter { !$0.isArchived },
+                initialDay: WorkoutCalendarLogic.initialWorkoutDay(selectedDay: selectedWorkoutDay, now: .now, calendar: Self.workoutCalendar)
+            ) { day, entries in
                 saveWorkout(day: day, entries: entries)
             }
         }
@@ -206,8 +234,18 @@ struct MainView: View {
                 }
                     .buttonStyle(.borderedProminent)
                     .tint(MeleteStyle.accent)
-                    .disabled(exercises.filter { !$0.isArchived }.isEmpty)
+                    .disabled(!addWorkoutBlocks.isEmpty)
                     .accessibilityIdentifier("addWorkoutButton")
+            }
+            if !addWorkoutBlocks.isEmpty {
+                Text([
+                    addWorkoutBlocks.contains(.noActiveExercises) ? "有効な種目を作成するか、アーカイブ済みの種目を復帰してください。" : nil,
+                    addWorkoutBlocks.contains(.futureDay) ? "未来の日付が選択されています。今日以前の日付を選ぶか、全履歴に戻してください。" : nil,
+                    addWorkoutBlocks.contains(.invalidSelectedDay) ? "選択日を読み取れません。全履歴に戻してから日付を選び直してください。" : nil
+                ].compactMap { $0 }.joined(separator: " "))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("addWorkoutDisabledReason")
             }
             HStack(alignment: .top, spacing: 18) {
                 calendarView
@@ -365,6 +403,19 @@ struct MainView: View {
         }
         .padding(10)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var activeExercises: [Exercise] {
+        exercises.filter { !$0.isArchived }
+    }
+
+    private var addWorkoutBlocks: [WorkoutCalendarLogic.AddWorkoutBlock] {
+        WorkoutCalendarLogic.addWorkoutBlocks(
+            activeExerciseCount: activeExercises.count,
+            selectedDay: selectedWorkoutDay,
+            now: .now,
+            calendar: Self.workoutCalendar
+        )
     }
 
     private func changeDisplayedMonth(by amount: Int) {

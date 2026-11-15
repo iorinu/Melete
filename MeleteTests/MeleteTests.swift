@@ -600,6 +600,42 @@ final class MeleteTests: XCTestCase {
         XCTAssertEqual(WorkoutCalendarLogic.dayKey(afterDST, calendar: losAngeles), "2024-03-10")
     }
 
+    func testWorkoutCalendarSelectionAndAddAvailabilityAtFixedNow() throws {
+        let tokyo = WorkoutCalendarLogic.calendar(timeZone: try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo")))
+        let honolulu = WorkoutCalendarLogic.calendar(timeZone: try XCTUnwrap(TimeZone(identifier: "Pacific/Honolulu")))
+        let fixedNow = try XCTUnwrap(tokyo.date(from: DateComponents(year: 2026, month: 11, day: 15, hour: 12)))
+        let today = try XCTUnwrap(WorkoutValueEditing.date(from: "2026-11-15", calendar: tokyo))
+        let past = try XCTUnwrap(WorkoutValueEditing.date(from: "2024-02-29", calendar: tokyo))
+        let future = try XCTUnwrap(WorkoutValueEditing.date(from: "2026-11-16", calendar: tokyo))
+
+        XCTAssertEqual(WorkoutCalendarLogic.initialWorkoutDay(selectedDay: nil, now: fixedNow, calendar: tokyo), tokyo.startOfDay(for: fixedNow))
+        XCTAssertEqual(WorkoutCalendarLogic.initialWorkoutDay(selectedDay: "2026-11-15", now: fixedNow, calendar: tokyo), tokyo.startOfDay(for: today))
+        XCTAssertEqual(WorkoutCalendarLogic.initialWorkoutDay(selectedDay: "2024-02-29", now: fixedNow, calendar: tokyo), tokyo.startOfDay(for: past))
+        XCTAssertEqual(WorkoutCalendarLogic.initialWorkoutDay(selectedDay: "2026-11-16", now: fixedNow, calendar: tokyo), tokyo.startOfDay(for: future))
+        XCTAssertNil(WorkoutCalendarLogic.initialWorkoutDay(selectedDay: "2026-02-30", now: fixedNow, calendar: tokyo), "不正選択を今日にfallbackしない")
+
+        XCTAssertTrue(WorkoutCalendarLogic.addWorkoutBlocks(activeExerciseCount: 1, selectedDay: nil, now: fixedNow, calendar: tokyo).isEmpty)
+        XCTAssertTrue(WorkoutCalendarLogic.addWorkoutBlocks(activeExerciseCount: 1, selectedDay: "2026-11-15", now: fixedNow, calendar: tokyo).isEmpty)
+        XCTAssertTrue(WorkoutCalendarLogic.addWorkoutBlocks(activeExerciseCount: 1, selectedDay: "2024-02-29", now: fixedNow, calendar: tokyo).isEmpty)
+        XCTAssertEqual(WorkoutCalendarLogic.addWorkoutBlocks(activeExerciseCount: 1, selectedDay: "2026-11-16", now: fixedNow, calendar: tokyo), [.futureDay])
+        XCTAssertEqual(WorkoutCalendarLogic.addWorkoutBlocks(activeExerciseCount: 0, selectedDay: nil, now: fixedNow, calendar: tokyo), [.noActiveExercises])
+        XCTAssertEqual(WorkoutCalendarLogic.addWorkoutBlocks(activeExerciseCount: 0, selectedDay: "2026-11-16", now: fixedNow, calendar: tokyo), [.noActiveExercises, .futureDay])
+        XCTAssertEqual(WorkoutCalendarLogic.addWorkoutBlocks(activeExerciseCount: 0, selectedDay: "2026-02-30", now: fixedNow, calendar: tokyo), [.noActiveExercises, .invalidSelectedDay])
+        XCTAssertEqual(WorkoutCalendarLogic.addWorkoutBlocks(activeExerciseCount: 1, selectedDay: "2026-02-30", now: fixedNow, calendar: tokyo), [.invalidSelectedDay])
+        XCTAssertTrue(WorkoutCalendarLogic.addWorkoutBlocks(activeExerciseCount: 1, selectedDay: nil, now: fixedNow, calendar: honolulu).isEmpty, "全履歴に戻すと未来日ブロックを解除")
+
+        let timezoneCases: [(Calendar, String, String)] = [
+            (tokyo, "2024-02-29", "2024-02-29"),
+            (honolulu, "2024-03-10", "2024-03-10"),
+            (tokyo, "2025-12-31", "2025-12-31"),
+            (honolulu, "2026-01-01", "2026-01-01")
+        ]
+        for (calendar, key, expected) in timezoneCases {
+            let date = try XCTUnwrap(WorkoutCalendarLogic.initialWorkoutDay(selectedDay: key, now: fixedNow, calendar: calendar))
+            XCTAssertEqual(Workout.dayString(from: date, calendar: calendar), expected, "独立した期待日: \(key)")
+        }
+    }
+
     func testWorkoutFilterReturnsSameDayRecordsOrAllHistory() {
         let first = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [])
         let sameDay = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [])
