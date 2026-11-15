@@ -52,6 +52,27 @@ struct WorkoutSetAdditionDraft: Identifiable {
     var values: [UUID: String]
 }
 
+struct WorkoutSetAdditionDrafts {
+    private(set) var items: [WorkoutSetAdditionDraft] = []
+
+    mutating func append(_ draft: WorkoutSetAdditionDraft) {
+        items.append(draft)
+    }
+
+    mutating func cancel(id: UUID) {
+        items.removeAll { $0.id == id }
+    }
+
+    func value(draftID: UUID, metricID: UUID) -> String {
+        items.first(where: { $0.id == draftID })?.values[metricID] ?? ""
+    }
+
+    mutating func setValue(_ value: String, draftID: UUID, metricID: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == draftID }) else { return }
+        items[index].values[metricID] = value
+    }
+}
+
 struct WorkoutSetMetricDraft: Equatable {
     let id: UUID
     let name: String

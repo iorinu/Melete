@@ -265,7 +265,7 @@ struct WorkoutValueEditForm: View {
     @State private var drafts: [WorkoutValueEditDraft]
     @State private var day: Date
     @State private var validationError: String?
-    @State private var additions: [WorkoutSetAdditionDraft] = []
+    @State private var additions = WorkoutSetAdditionDrafts()
 
     init(workout: Workout, exercises: [Exercise], onSave: @escaping (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?) {
         self.workout = workout
@@ -308,20 +308,23 @@ struct WorkoutValueEditForm: View {
                             }
                             .padding(.vertical, 4)
                         }
-                        ForEach(additions.indices.filter { additions[$0].recordID == record.id }, id: \.self) { index in
+                        ForEach(additions.items.filter { $0.recordID == record.id }) { addition in
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("追加セット（未保存）").font(.headline)
-                                if additions[index].metrics.isEmpty {
+                                if addition.metrics.isEmpty {
                                     Text("有効な項目がないため、この種目にはセットを追加できません。")
                                         .foregroundStyle(.red)
                                 }
-                                ForEach(additions[index].metrics, id: \.id) { metric in
+                                ForEach(addition.metrics, id: \.id) { metric in
                                     HStack {
                                         Text("\(metric.name)（\(metric.unit)）\(metric.isRequired ? "*" : "")")
                                             .frame(maxWidth: .infinity, alignment: .leading)
-                                        TextField(metric.allowsDecimal ? "小数第3位まで" : "0以上の整数", text: additionBinding(index: index, metric: metric))
+                                        TextField(metric.allowsDecimal ? "小数第3位まで" : "0以上の整数", text: additionBinding(draftID: addition.id, metric: metric))
                                             .frame(minWidth: 100, maxWidth: 180).textFieldStyle(.roundedBorder)
                                     }
+                                }
+                                Button("追加を取り消す", role: .destructive) {
+                                    additions.cancel(id: addition.id)
                                 }
                             }.padding(.vertical, 4)
                         }
@@ -358,7 +361,7 @@ struct WorkoutValueEditForm: View {
         case .failure(let error):
             validationError = error.localizedDescription
         case .success:
-            if let error = onSave(day, drafts, additions) {
+            if let error = onSave(day, drafts, additions.items) {
                 validationError = error
             } else {
                 dismiss()
@@ -366,8 +369,12 @@ struct WorkoutValueEditForm: View {
         }
     }
 
-    private func additionBinding(index: Int, metric: WorkoutSetMetricDraft) -> Binding<String> {
-        Binding(get: { additions[index].values[metric.id] ?? "" }, set: { additions[index].values[metric.id] = $0 })
+    private func additionBinding(draftID: UUID, metric: WorkoutSetMetricDraft) -> Binding<String> {
+        Binding(get: {
+            additions.value(draftID: draftID, metricID: metric.id)
+        }, set: { value in
+            additions.setValue(value, draftID: draftID, metricID: metric.id)
+        })
     }
 
 }

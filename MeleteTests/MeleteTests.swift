@@ -432,6 +432,53 @@ final class MeleteTests: XCTestCase {
         XCTAssertEqual(record.sets.count, 1, "順序overflow時に追加セットを残さない")
     }
 
+    func testWorkoutSetAdditionDraftCancellationTargetsIDsAndSavesOnlyRemainingDrafts() throws {
+        let metricA = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+        let metricB = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: true, sortOrder: 0)
+        let exerciseA = Exercise(name: "種目A", metrics: [metricA])
+        let exerciseB = Exercise(name: "種目B", metrics: [metricB])
+        let recordA = ExerciseRecord(exercise: exerciseA, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metricA, scaledValue: 5_000)])])
+        let recordB = ExerciseRecord(exercise: exerciseB, sortOrder: 1, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metricB, scaledValue: 8_000)])])
+        let originalDay = Date(timeIntervalSince1970: 1_794_686_400)
+        let workout = Workout(day: originalDay, records: [recordA, recordB])
+        let originalDayString = workout.day
+        let existingValues = [recordA, recordB].flatMap(\.sets).flatMap(\.values)
+        var additions = WorkoutSetAdditionDrafts()
+        let draftA1 = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordA, exercise: exerciseA))
+        let draftB1 = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordB, exercise: exerciseB))
+        let draftA2 = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordA, exercise: exerciseA))
+        let draftB2 = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordB, exercise: exerciseB))
+        let draftA3 = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordA, exercise: exerciseA))
+        [draftA1, draftB1, draftA2, draftB2, draftA3].forEach { additions.append($0) }
+
+        additions.setValue("11.5", draftID: draftA1.id, metricID: metricA.id)
+        additions.setValue("12", draftID: draftA2.id, metricID: metricA.id)
+        additions.setValue("13", draftID: draftA3.id, metricID: metricA.id)
+        additions.setValue("21", draftID: draftB1.id, metricID: metricB.id)
+        additions.setValue("22", draftID: draftB2.id, metricID: metricB.id)
+        additions.cancel(id: draftA1.id) // 先頭
+        additions.cancel(id: draftB1.id) // 別種目の先頭
+        additions.cancel(id: draftB2.id) // 残存配列の中間
+        additions.setValue("999", draftID: UUID(), metricID: metricA.id)
+
+        XCTAssertEqual(additions.items.map(\.id), [draftA2.id, draftA3.id])
+        XCTAssertEqual(additions.value(draftID: draftA2.id, metricID: metricA.id), "12")
+        XCTAssertEqual(additions.value(draftID: draftA3.id, metricID: metricA.id), "13")
+        XCTAssertEqual(additions.value(draftID: draftA1.id, metricID: metricA.id), "")
+        XCTAssertEqual(additions.value(draftID: draftB2.id, metricID: metricB.id), "")
+        XCTAssertTrue([recordA, recordB].allSatisfy { $0.sets.count == 1 }, "取消し前のdraftは保存済みセットに触れない")
+        XCTAssertEqual(workout.day, originalDayString, "取消しではWorkoutの日付を変更しない")
+        XCTAssertEqual(existingValues.map(\.scaledValue), [5_000, 8_000], "取消しでは保存済み値を変更しない")
+
+        let editedDay = Date(timeIntervalSince1970: 1_706_659_200)
+        try WorkoutValueEditing.save([], additions: additions.items, day: editedDay, to: workout, exercises: [exerciseA, exerciseB], now: Date(timeIntervalSince1970: 1_800_000_000)) {}
+        XCTAssertEqual(workout.records.first { $0.id == recordA.id }?.sets.map(\.sortOrder).sorted(), [1, 2, 3])
+        XCTAssertEqual(recordB.sets.map(\.sortOrder), [1], "取り消した種目Bのdraftは追加しない")
+        XCTAssertEqual(recordA.sets.first { $0.sortOrder == 2 }?.values.first?.scaledValue, 12_000)
+        XCTAssertEqual(recordA.sets.first { $0.sortOrder == 3 }?.values.first?.scaledValue, 13_000)
+        XCTAssertEqual(workout.day, Workout.dayString(from: editedDay, calendar: .current), "残ったdraftを保存し、日付変更も反映する")
+    }
+
     func testWorkoutSetAdditionAllowsEmptyOptionalSetAndKeepsZeroDistinct() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteOptionalSet-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
