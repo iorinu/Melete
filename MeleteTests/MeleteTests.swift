@@ -91,6 +91,7 @@ final class MeleteTests: XCTestCase {
         invalid = entries
         invalid[1].sets[0].values[otherMetric.id] = ""
         if case .success = WorkoutSetDraftEditing.validatedEntries(invalid) { XCTFail("別種目の必須空欄があれば全体を拒否") }
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).count, 0, "検証失敗した値は永続処理へ渡さない")
 
         guard case .success(let validated) = WorkoutSetDraftEditing.validatedEntries(entries) else {
             return XCTFail("有効な入力を検証")
@@ -100,11 +101,7 @@ final class MeleteTests: XCTestCase {
         XCTAssertEqual(validated[0].sets[1].parsedValues[optional.id] ?? nil, 0)
         XCTAssertTrue(entries[0].sets.allSatisfy { $0.parsedValues.isEmpty }, "入力draft自体のキャッシュを汚染しない")
 
-        let records = validated.enumerated().map { recordIndex, entry in
-            ExerciseRecord(exercise: entry.exercise, sortOrder: recordIndex, sets: entry.sets.enumerated().map { setIndex, draft in
-                SetRecord(sortOrder: setIndex + 1, values: entry.exercise.metrics.filter(\.isActive).map { MetricValue(metric: $0, scaledValue: draft.parsedValues[$0.id] ?? nil) })
-            })
-        }
+        let records = MainView.workoutRecords(from: validated)
         let workout = Workout(day: .now, records: records)
         context.insert(exercise)
         context.insert(otherExercise)
@@ -113,6 +110,9 @@ final class MeleteTests: XCTestCase {
         let reopened = try ModelContainer(for: schema, configurations: [configuration])
         let reopenedContext = ModelContext(reopened)
         let saved = try XCTUnwrap(reopenedContext.fetch(FetchDescriptor<Workout>()).first)
+        XCTAssertEqual(saved.records.sorted { $0.sortOrder < $1.sortOrder }.map(\.exerciseName), ["種目", "別種目"])
+        XCTAssertEqual(saved.records.map(\.sortOrder).sorted(), [0, 1])
+        XCTAssertEqual(Set(saved.records.map(\.id)).count, 2)
         let record = try XCTUnwrap(saved.records.first { $0.exerciseID == exercise.id })
         XCTAssertEqual(record.sets.sorted { $0.sortOrder < $1.sortOrder }.map(\.sortOrder), [1, 2])
         let savedSets = record.sets.sorted { $0.sortOrder < $1.sortOrder }
@@ -121,6 +121,7 @@ final class MeleteTests: XCTestCase {
         XCTAssertEqual(savedSets[1].values.first { $0.metricID == optional.id }?.scaledValue, 0)
         XCTAssertEqual(Set(savedSets.map(\.id)).count, 2)
         XCTAssertEqual(Set(savedSets.flatMap(\.values).map(\.id)).count, 4)
+        XCTAssertEqual(Set(saved.records.flatMap(\.sets).flatMap(\.values).map(\.id)).count, 5)
         XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<Workout>()).count, 1)
     }
 

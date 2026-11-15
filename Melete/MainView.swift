@@ -530,7 +530,14 @@ struct MainView: View {
     }
 
     private func saveWorkout(day: Date, entries: [WorkoutEntryDraft]) -> Bool {
-        let records = entries.enumerated().map { recordIndex, entry in
+        let workout = Workout(day: day, records: Self.workoutRecords(from: entries))
+        context.insert(workout)
+        do { try context.save(); return true }
+        catch { context.rollback(); errorMessage = error.localizedDescription; return false }
+    }
+
+    static func workoutRecords(from entries: [WorkoutEntryDraft]) -> [ExerciseRecord] {
+        entries.enumerated().map { recordIndex, entry in
             let sets = entry.sets.enumerated().map { setIndex, values in
                 let savedValues = entry.exercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }.map { metric in
                     MetricValue(metric: metric, scaledValue: values.parsedValues[metric.id] ?? nil)
@@ -539,9 +546,6 @@ struct MainView: View {
             }
             return ExerciseRecord(exercise: entry.exercise, sortOrder: recordIndex, sets: sets)
         }
-        context.insert(Workout(day: day, records: records))
-        do { try context.save(); return true }
-        catch { context.rollback(); errorMessage = error.localizedDescription; return false }
     }
 
     private func saveWorkoutEdits(workout: Workout, day: Date, drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft]) -> String? {
