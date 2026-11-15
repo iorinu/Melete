@@ -136,9 +136,68 @@ struct WorkoutEntryDraft: Identifiable {
 }
 
 struct WorkoutSetDraft: Identifiable {
-    let id = UUID()
+    let id: UUID
     var values: [UUID: String] = [:]
     var parsedValues: [UUID: Int64?] = [:]
+
+    init(values: [UUID: String] = [:]) {
+        id = UUID()
+        self.values = values
+    }
+
+    init(copying draft: WorkoutSetDraft) {
+        id = UUID()
+        values = draft.values
+    }
+}
+
+enum WorkoutSetDraftEditing {
+    static func duplicate(entryID: UUID, setID: UUID, in entries: inout [WorkoutEntryDraft]) {
+        guard let entryIndex = entries.firstIndex(where: { $0.id == entryID }),
+              let setIndex = entries[entryIndex].sets.firstIndex(where: { $0.id == setID }) else { return }
+        entries[entryIndex].sets.insert(WorkoutSetDraft(copying: entries[entryIndex].sets[setIndex]), at: setIndex + 1)
+    }
+
+    static func remove(entryID: UUID, setID: UUID, from entries: inout [WorkoutEntryDraft]) {
+        guard let entryIndex = entries.firstIndex(where: { $0.id == entryID }),
+              let setIndex = entries[entryIndex].sets.firstIndex(where: { $0.id == setID }),
+              entries[entryIndex].sets.count > 1 else { return }
+        entries[entryIndex].sets.remove(at: setIndex)
+    }
+
+    static func validatedEntries(_ entries: [WorkoutEntryDraft]) -> Result<[WorkoutEntryDraft], WorkoutSetDraftValidationError> {
+        for entry in entries {
+            let metrics = entry.exercise.metrics.filter(\.isActive)
+            for (index, set) in entry.sets.enumerated() {
+                for metric in metrics {
+                    let raw = set.values[metric.id] ?? ""
+                    let value = raw.isEmpty ? nil : MetricInput.parse(raw, allowsDecimal: metric.allowsDecimal)
+                    if !raw.isEmpty && value == nil {
+                        return .failure(WorkoutSetDraftValidationError(message: "\(entry.exercise.name)・セット\(index + 1)の「\(metric.name)」は0以上の有効な数値を入力してください。"))
+                    }
+                    if metric.isRequired && value == nil {
+                        return .failure(WorkoutSetDraftValidationError(message: "\(entry.exercise.name)・セット\(index + 1)の「\(metric.name)」は必須です。"))
+                    }
+                }
+            }
+        }
+        var validatedEntries = entries
+        for entryIndex in validatedEntries.indices {
+            for setIndex in validatedEntries[entryIndex].sets.indices {
+                var parsed: [UUID: Int64?] = [:]
+                for metric in validatedEntries[entryIndex].exercise.metrics where metric.isActive {
+                    let raw = validatedEntries[entryIndex].sets[setIndex].values[metric.id] ?? ""
+                    parsed[metric.id] = raw.isEmpty ? nil : MetricInput.parse(raw, allowsDecimal: metric.allowsDecimal)
+                }
+                validatedEntries[entryIndex].sets[setIndex].parsedValues = parsed
+            }
+        }
+        return .success(validatedEntries)
+    }
+}
+
+struct WorkoutSetDraftValidationError: Error {
+    let message: String
 }
 
 struct WorkoutForm: View {
@@ -219,8 +278,11 @@ struct WorkoutForm: View {
                         HStack {
                             Text("セット \(setIndex + 1)").font(.headline)
                         Spacer()
+                        Button("複製") { WorkoutSetDraftEditing.duplicate(entryID: entry.wrappedValue.id, setID: set.id, in: &entries) }
+                            .accessibilityLabel("\(entry.wrappedValue.exercise.name)・セット\(setIndex + 1)を複製")
+                            .accessibilityIdentifier("duplicateSet_\(set.id.uuidString)")
                         if entry.wrappedValue.sets.count > 1 {
-                            Button("削除", role: .destructive) { entry.wrappedValue.sets.remove(at: setIndex) }
+                            Button("削除", role: .destructive) { WorkoutSetDraftEditing.remove(entryID: entry.wrappedValue.id, setID: set.id, from: &entries) }
                         }
                     }
                     ForEach(metrics) { metric in
@@ -263,33 +325,10 @@ struct WorkoutForm: View {
     private func save() {
         let calendar = Calendar.current
         guard calendar.startOfDay(for: day) <= calendar.startOfDay(for: .now) else { validationError = "運動日は今日以前の日付を選択してください。"; return }
-        let metricsByEntry = entries.map { ($0, $0.exercise.metrics.filter(\.isActive)) }
-        for (entry, metrics) in metricsByEntry {
-            for (index, set) in entry.sets.enumerated() {
-                for metric in metrics {
-                    let raw = set.values[metric.id] ?? ""
-                    let value = raw.isEmpty ? nil : MetricInput.parse(raw, allowsDecimal: metric.allowsDecimal)
-                    if !raw.isEmpty && value == nil {
-                        validationError = "\(entry.exercise.name)・セット\(index + 1)の「\(metric.name)」は0以上の有効な数値を入力してください。"
-                        return
-                    }
-                    if metric.isRequired && value == nil {
-                        validationError = "\(entry.exercise.name)・セット\(index + 1)の「\(metric.name)」は必須です。"
-                        return
-                    }
-                }
-            }
-        }
-        var validatedEntries = entries
-        for entryIndex in validatedEntries.indices {
-            for setIndex in validatedEntries[entryIndex].sets.indices {
-                var parsed: [UUID: Int64?] = [:]
-                for metric in validatedEntries[entryIndex].exercise.metrics where metric.isActive {
-                    let raw = validatedEntries[entryIndex].sets[setIndex].values[metric.id] ?? ""
-                    parsed[metric.id] = raw.isEmpty ? nil : MetricInput.parse(raw, allowsDecimal: metric.allowsDecimal)
-                }
-                validatedEntries[entryIndex].sets[setIndex].parsedValues = parsed
-            }
+        let validatedEntries: [WorkoutEntryDraft]
+        switch WorkoutSetDraftEditing.validatedEntries(entries) {
+        case .failure(let error): validationError = error.message; return
+        case .success(let result): validatedEntries = result
         }
         guard onSave(day, validatedEntries) else { return }
         dismiss()

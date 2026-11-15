@@ -3,6 +3,127 @@ import SwiftData
 @testable import Melete
 
 final class MeleteTests: XCTestCase {
+    func testWorkoutSetDraftCopyKeepsRawInputsButGetsIndependentIdentityAndNoParsedCache() {
+        let metricID = UUID()
+        var source = WorkoutSetDraft(values: [metricID: " 1.2345 ", UUID(): ""])
+        source.parsedValues[metricID] = 1_234
+
+        let copy = WorkoutSetDraft(copying: source)
+
+        XCTAssertNotEqual(copy.id, source.id)
+        XCTAssertEqual(copy.values, source.values, "不正な文字列や空欄も加工せず複製する")
+        XCTAssertTrue(copy.parsedValues.isEmpty, "検証済みキャッシュを複製せず、保存時に再検証する")
+        XCTAssertEqual(copy.values[metricID], " 1.2345 ")
+        source.values[metricID] = "2"
+        XCTAssertEqual(copy.values[metricID], " 1.2345 ", "複製後の編集は元draftに影響しない")
+    }
+
+    func testWorkoutSetDraftEditingUsesFormOperationsForOrderingRemovalAndSafeNoOps() throws {
+        let required = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+        let optional = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 1)
+        let exercise = Exercise(name: "種目", metrics: [required, optional])
+        let otherExercise = Exercise(name: "別種目", metrics: [required])
+        let firstEntry = WorkoutEntryDraft(exercise: exercise)
+        let otherEntry = WorkoutEntryDraft(exercise: otherExercise)
+        var entries = [firstEntry, otherEntry]
+        entries[0].sets[0].values = [required.id: "0", optional.id: "", UUID(): "partial"]
+        entries[0].sets[0].parsedValues[required.id] = 99
+        let originalSet = entries[0].sets[0]
+
+        WorkoutSetDraftEditing.duplicate(entryID: firstEntry.id, setID: originalSet.id, in: &entries)
+        XCTAssertEqual(entries[0].sets.count, 2)
+        let copy = try XCTUnwrap(entries[0].sets.last)
+        XCTAssertEqual(copy.values, originalSet.values, "空欄・0・部分入力を含むraw値をそのまま保持")
+        XCTAssertNotEqual(copy.id, originalSet.id)
+        XCTAssertTrue(copy.parsedValues.isEmpty)
+        XCTAssertEqual(entries[1].sets.map(\.id), otherEntry.sets.map(\.id), "他種目のセットは変更しない")
+
+        entries[0].sets[0].values[required.id] = "4"
+        XCTAssertEqual(entries[0].sets[1].values[required.id], "0", "複製後の編集は独立")
+        let middle = WorkoutSetDraft(values: [required.id: "5"])
+        entries[0].sets.append(middle)
+        WorkoutSetDraftEditing.remove(entryID: firstEntry.id, setID: copy.id, from: &entries)
+        XCTAssertEqual(entries[0].sets.map(\.id), [originalSet.id, middle.id], "削除後も残存セットIDで操作可能")
+        WorkoutSetDraftEditing.duplicate(entryID: firstEntry.id, setID: middle.id, in: &entries)
+        XCTAssertEqual(entries[0].sets.map(\.values[required.id]), ["4", "5", "5"])
+
+        let unchanged = entries
+        WorkoutSetDraftEditing.duplicate(entryID: UUID(), setID: middle.id, in: &entries)
+        WorkoutSetDraftEditing.duplicate(entryID: firstEntry.id, setID: UUID(), in: &entries)
+        WorkoutSetDraftEditing.remove(entryID: firstEntry.id, setID: UUID(), from: &entries)
+        XCTAssertEqual(entries[0].sets.map(\.id), unchanged[0].sets.map(\.id), "無効IDは安全な無操作")
+        for set in entries[0].sets.dropFirst() {
+            WorkoutSetDraftEditing.remove(entryID: firstEntry.id, setID: set.id, from: &entries)
+        }
+        let onlySetID = try XCTUnwrap(entries[0].sets.first?.id)
+        WorkoutSetDraftEditing.remove(entryID: firstEntry.id, setID: onlySetID, from: &entries)
+        XCTAssertEqual(entries[0].sets.map(\.id), [onlySetID], "最後のセットは削除不可")
+    }
+
+    func testWorkoutSetDraftValidationAndSavePersistOrderedUniqueCopies() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteWorkoutSetDraft-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("WorkoutSetDraft", schema: schema, url: directory.appendingPathComponent("test.store"), cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+        let required = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+        let optional = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 1)
+        let exercise = Exercise(name: "種目", metrics: [required, optional])
+        let otherMetric = MetricDefinition(name: "距離", unit: "m", allowsDecimal: false, isRequired: true, sortOrder: 0)
+        let otherExercise = Exercise(name: "別種目", metrics: [otherMetric])
+        var entries = [WorkoutEntryDraft(exercise: exercise), WorkoutEntryDraft(exercise: otherExercise)]
+        entries[0].sets[0].values = [required.id: "1.25", optional.id: ""]
+        WorkoutSetDraftEditing.duplicate(entryID: entries[0].id, setID: entries[0].sets[0].id, in: &entries)
+        entries[0].sets[1].values[required.id] = "0"
+        entries[0].sets[1].values[optional.id] = "0"
+        entries[1].sets[0].values[otherMetric.id] = "8"
+
+        var invalid = entries
+        invalid[0].sets[1].values[required.id] = "1.2345"
+        if case .success = WorkoutSetDraftEditing.validatedEntries(invalid) { XCTFail("複製後の不正値を拒否") }
+        invalid = entries
+        invalid[0].sets[1].values[required.id] = ""
+        if case .success = WorkoutSetDraftEditing.validatedEntries(invalid) { XCTFail("複製後の必須空欄を拒否") }
+        invalid = entries
+        invalid[1].sets[0].values[otherMetric.id] = "bad"
+        if case .success = WorkoutSetDraftEditing.validatedEntries(invalid) { XCTFail("別セットの不正値があれば全体を拒否") }
+        invalid = entries
+        invalid[1].sets[0].values[otherMetric.id] = ""
+        if case .success = WorkoutSetDraftEditing.validatedEntries(invalid) { XCTFail("別種目の必須空欄があれば全体を拒否") }
+
+        guard case .success(let validated) = WorkoutSetDraftEditing.validatedEntries(entries) else {
+            return XCTFail("有効な入力を検証")
+        }
+        XCTAssertEqual(validated[0].sets.map { $0.parsedValues[required.id] ?? nil }, [1_250, 0])
+        XCTAssertNil(validated[0].sets[0].parsedValues[optional.id] ?? nil)
+        XCTAssertEqual(validated[0].sets[1].parsedValues[optional.id] ?? nil, 0)
+        XCTAssertTrue(entries[0].sets.allSatisfy { $0.parsedValues.isEmpty }, "入力draft自体のキャッシュを汚染しない")
+
+        let records = validated.enumerated().map { recordIndex, entry in
+            ExerciseRecord(exercise: entry.exercise, sortOrder: recordIndex, sets: entry.sets.enumerated().map { setIndex, draft in
+                SetRecord(sortOrder: setIndex + 1, values: entry.exercise.metrics.filter(\.isActive).map { MetricValue(metric: $0, scaledValue: draft.parsedValues[$0.id] ?? nil) })
+            })
+        }
+        let workout = Workout(day: .now, records: records)
+        context.insert(exercise)
+        context.insert(otherExercise)
+        context.insert(workout)
+        try context.save()
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let saved = try XCTUnwrap(reopenedContext.fetch(FetchDescriptor<Workout>()).first)
+        let record = try XCTUnwrap(saved.records.first { $0.exerciseID == exercise.id })
+        XCTAssertEqual(record.sets.sorted { $0.sortOrder < $1.sortOrder }.map(\.sortOrder), [1, 2])
+        let savedSets = record.sets.sorted { $0.sortOrder < $1.sortOrder }
+        XCTAssertEqual(savedSets.map { $0.values.first { $0.metricID == required.id }?.scaledValue }, [1_250, 0])
+        XCTAssertNil(savedSets[0].values.first { $0.metricID == optional.id }?.scaledValue)
+        XCTAssertEqual(savedSets[1].values.first { $0.metricID == optional.id }?.scaledValue, 0)
+        XCTAssertEqual(Set(savedSets.map(\.id)).count, 2)
+        XCTAssertEqual(Set(savedSets.flatMap(\.values).map(\.id)).count, 4)
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<Workout>()).count, 1)
+    }
+
     func testExerciseNameEditingTrimsRejectsEmptyAndAllowsDuplicateNames() throws {
         XCTAssertEqual(ExerciseNameEditing.validatedName("  ベンチプレス \n"), "ベンチプレス")
         XCTAssertNil(ExerciseNameEditing.validatedName(" \n\t"))
