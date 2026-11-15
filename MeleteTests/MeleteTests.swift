@@ -83,6 +83,56 @@ final class MeleteTests: XCTestCase {
         }
     }
 
+    func testCalendarGridUsesMondayFirstAndLeapFebruary() throws {
+        let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let calendar = WorkoutCalendarLogic.calendar(timeZone: utc)
+        let february = try XCTUnwrap(calendar.date(from: DateComponents(year: 2024, month: 2, day: 19)))
+        let grid = WorkoutCalendarLogic.monthGrid(for: february, calendar: calendar)
+        XCTAssertEqual(grid.dayCount, 29)
+        XCTAssertEqual(grid.weekdayOffset, 3) // 2024-02-01 は木曜日
+        XCTAssertEqual(grid.cellCount, 35)
+        XCTAssertEqual(WorkoutCalendarLogic.date(day: 1, in: grid, calendar: calendar), try XCTUnwrap(calendar.date(from: DateComponents(year: 2024, month: 2, day: 1))))
+        XCTAssertEqual(WorkoutCalendarLogic.date(day: 29, in: grid, calendar: calendar), try XCTUnwrap(calendar.date(from: DateComponents(year: 2024, month: 2, day: 29))))
+        XCTAssertNil(WorkoutCalendarLogic.date(day: 30, in: grid, calendar: calendar))
+    }
+
+    func testCalendarGridHandlesMonthEndAndYearChange() throws {
+        let calendar = WorkoutCalendarLogic.calendar(timeZone: try XCTUnwrap(TimeZone(secondsFromGMT: 0)))
+        let december = try XCTUnwrap(calendar.date(from: DateComponents(year: 2024, month: 12, day: 31)))
+        let decemberGrid = WorkoutCalendarLogic.monthGrid(for: december, calendar: calendar)
+        XCTAssertEqual(decemberGrid.dayCount, 31)
+        XCTAssertEqual(WorkoutCalendarLogic.dayKey(try XCTUnwrap(WorkoutCalendarLogic.date(day: 31, in: decemberGrid, calendar: calendar)), calendar: calendar), "2024-12-31")
+        let january = try XCTUnwrap(calendar.date(byAdding: .month, value: 1, to: decemberGrid.start))
+        let januaryGrid = WorkoutCalendarLogic.monthGrid(for: january, calendar: calendar)
+        XCTAssertEqual(calendar.component(.year, from: januaryGrid.start), 2025)
+        XCTAssertEqual(calendar.component(.month, from: januaryGrid.start), 1)
+        XCTAssertEqual(januaryGrid.dayCount, 31)
+    }
+
+    func testDateKeysInTokyoHonoluluAndAcrossDaylightSavingBoundary() throws {
+        let tokyo = WorkoutCalendarLogic.calendar(timeZone: try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo")))
+        let honolulu = WorkoutCalendarLogic.calendar(timeZone: try XCTUnwrap(TimeZone(identifier: "Pacific/Honolulu")))
+        let instant = Date(timeIntervalSince1970: 1_710_000_000) // 固定時刻: 2024-03-09 UTC
+        XCTAssertEqual(WorkoutCalendarLogic.dayKey(instant, calendar: tokyo), "2024-03-10")
+        XCTAssertEqual(WorkoutCalendarLogic.dayKey(instant, calendar: honolulu), "2024-03-09")
+
+        let losAngeles = WorkoutCalendarLogic.calendar(timeZone: try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles")))
+        let beforeDST = Date(timeIntervalSince1970: 1_710_064_799) // 2024-03-10 01:59:59 PST
+        let afterDST = Date(timeIntervalSince1970: 1_710_064_800) // 2024-03-10 03:00:00 PDT
+        XCTAssertEqual(WorkoutCalendarLogic.dayKey(beforeDST, calendar: losAngeles), "2024-03-10")
+        XCTAssertEqual(WorkoutCalendarLogic.dayKey(afterDST, calendar: losAngeles), "2024-03-10")
+    }
+
+    func testWorkoutFilterReturnsSameDayRecordsOrAllHistory() {
+        let first = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [])
+        let sameDay = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [])
+        let otherDay = Workout(day: Date(timeIntervalSince1970: 1_700_086_400), records: [])
+        let workouts = [first, sameDay, otherDay]
+        XCTAssertEqual(WorkoutCalendarLogic.workouts(on: first.day, from: workouts).map(\.id), [first.id, sameDay.id])
+        XCTAssertEqual(WorkoutCalendarLogic.workouts(on: nil, from: workouts).map(\.id), workouts.map(\.id))
+        XCTAssertTrue(WorkoutCalendarLogic.workouts(on: "2099-01-01", from: workouts).isEmpty)
+    }
+
     func testArchiveAndFileStoreRoundTripPreserveHistoryAndSetOrder() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

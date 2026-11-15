@@ -5,6 +5,36 @@ private enum MeleteStyle {
     static let accent = Color(red: 0.76, green: 0.31, blue: 0.16)
 }
 
+enum WorkoutCalendarLogic {
+    static func calendar(timeZone: TimeZone) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        calendar.firstWeekday = 2
+        return calendar
+    }
+
+    static func monthGrid(for date: Date, calendar: Calendar) -> (start: Date, dayCount: Int, weekdayOffset: Int, cellCount: Int) {
+        let start = calendar.dateInterval(of: .month, for: date)?.start ?? date
+        let dayCount = calendar.range(of: .day, in: .month, for: start)?.count ?? 0
+        let weekdayOffset = (calendar.component(.weekday, from: start) + 5) % 7
+        return (start, dayCount, weekdayOffset, ((weekdayOffset + dayCount + 6) / 7) * 7)
+    }
+
+    static func date(day: Int, in grid: (start: Date, dayCount: Int, weekdayOffset: Int, cellCount: Int), calendar: Calendar) -> Date? {
+        guard (1...grid.dayCount).contains(day) else { return nil }
+        return calendar.date(byAdding: .day, value: day - 1, to: grid.start)
+    }
+
+    static func dayKey(_ date: Date, calendar: Calendar) -> String {
+        Workout.dayString(from: date, calendar: calendar)
+    }
+
+    static func workouts(on day: String?, from workouts: [Workout]) -> [Workout] {
+        guard let day else { return workouts }
+        return workouts.filter { $0.day == day }
+    }
+}
+
 struct MainView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Exercise.name) private var exercises: [Exercise]
@@ -15,6 +45,8 @@ struct MainView: View {
     @State private var showingWorkoutForm = false
     @State private var pendingWorkoutDeletion: Workout?
     @State private var errorMessage: String?
+    @State private var displayedMonth = Calendar(identifier: .gregorian).dateInterval(of: .month, for: .now)?.start ?? .now
+    @State private var selectedWorkoutDay: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -135,7 +167,7 @@ struct MainView: View {
                     .frame(maxWidth: .infinity, minHeight: 180)
                 }
 
-                Text("カレンダー・目標・分析・設定・AIチャットは未実装です。")
+                Text("目標・分析・設定・AIチャットは未実装です。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -156,7 +188,7 @@ struct MainView: View {
     }
 
     private var history: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             HStack {
                 VStack(alignment: .leading, spacing: 7) {
                     Text("運動履歴").font(.system(size: 32, weight: .bold, design: .rounded))
@@ -171,58 +203,168 @@ struct MainView: View {
                     .disabled(exercises.filter { !$0.isArchived }.isEmpty)
                     .accessibilityIdentifier("addWorkoutButton")
             }
-            if workouts.isEmpty {
-                ContentUnavailableView {
-                    Label("記録はまだありません", systemImage: "figure.strengthtraining.traditional")
-                } description: {
-                    Text(exercises.isEmpty ? "まず種目を作成してください。" : "「運動を追加」から最初の運動を記録できます。")
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List(workouts) { workout in
-                    VStack(alignment: .leading, spacing: 16) {
-                        HStack {
-                            Text(Self.displayDay(workout.day)).font(.system(.title2, design: .rounded).weight(.bold))
-                            Spacer()
-                            Button(role: .destructive) {
-                                pendingWorkoutDeletion = workout
-                            } label: {
-                                Label("削除", systemImage: "trash")
-                            }
-                            .labelStyle(.iconOnly)
-                            .help("この運動記録を削除")
-                            .accessibilityLabel("\(Self.displayDay(workout.day))の運動記録を削除")
+            HStack(alignment: .top, spacing: 18) {
+                calendarView
+                    .frame(width: 250, alignment: .topLeading)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text(selectedWorkoutDay.map(Self.displayDay) ?? "全履歴")
+                            .font(.title2.weight(.semibold))
+                            .accessibilityAddTraits(.isHeader)
+                        Spacer(minLength: 8)
+                        if selectedWorkoutDay != nil {
+                            Button("全履歴") { selectedWorkoutDay = nil }
+                                .help("選択を解除して全履歴を表示")
                         }
-                        Divider().overlay(.primary.opacity(0.12))
-                        ForEach(workout.records.sorted { $0.sortOrder < $1.sortOrder }) { record in
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(record.exerciseName).font(.headline)
-                                ForEach(record.sets.sorted { $0.sortOrder < $1.sortOrder }) { set in
-                                    HStack(alignment: .firstTextBaseline, spacing: 14) {
-                                        Text("セット \(set.sortOrder)")
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(.secondary)
-                                            .frame(width: 66, alignment: .leading)
-                                        Text(set.values.compactMap(displayValue).joined(separator: "　·　"))
-                                            .font(.system(.title3, design: .rounded).weight(.semibold))
-                                            .foregroundStyle(.primary)
-                                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .contain)
+
+                    let visibleWorkouts = WorkoutCalendarLogic.workouts(on: selectedWorkoutDay, from: workouts)
+                    if visibleWorkouts.isEmpty {
+                        ContentUnavailableView {
+                            Label(selectedWorkoutDay == nil ? "記録はまだありません" : "この日は未記録です", systemImage: "figure.strengthtraining.traditional")
+                        } description: {
+                            Text(selectedWorkoutDay == nil
+                                 ? (exercises.isEmpty ? "まず種目を作成してください。" : "「運動を追加」から最初の運動を記録できます。")
+                                 : "選択した日に運動記録はありません。")
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        List(visibleWorkouts) { workout in
+                            VStack(alignment: .leading, spacing: 16) {
+                                HStack {
+                                    Text(Self.displayDay(workout.day)).font(.system(.title2, design: .rounded).weight(.bold))
+                                    Spacer()
+                                    Button(role: .destructive) {
+                                        pendingWorkoutDeletion = workout
+                                    } label: {
+                                        Label("削除", systemImage: "trash")
+                                    }
+                                    .labelStyle(.iconOnly)
+                                    .help("この運動記録を削除")
+                                    .accessibilityLabel("\(Self.displayDay(workout.day))の運動記録を削除")
+                                }
+                                Divider().overlay(.primary.opacity(0.12))
+                                ForEach(workout.records.sorted { $0.sortOrder < $1.sortOrder }) { record in
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        Text(record.exerciseName).font(.headline)
+                                        ForEach(record.sets.sorted { $0.sortOrder < $1.sortOrder }) { set in
+                                            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                                                Text("セット \(set.sortOrder)")
+                                                    .font(.caption.weight(.semibold))
+                                                    .foregroundStyle(.secondary)
+                                                    .frame(width: 66, alignment: .leading)
+                                                Text(set.values.compactMap(displayValue).joined(separator: "　·　"))
+                                                    .font(.system(.title3, design: .rounded).weight(.semibold))
+                                                    .foregroundStyle(.primary)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            .padding(18)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(EdgeInsets(top: 6, leading: 4, bottom: 6, trailing: 4))
                         }
+                        .listStyle(.plain)
+                        .scrollContentBackground(.hidden)
                     }
-                    .padding(18)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 6, leading: 4, bottom: 6, trailing: 4))
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(10)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
-            Spacer(minLength: 0)
-        }.padding(28)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var calendarView: some View {
+        let calendar = Self.workoutCalendar
+        let grid = WorkoutCalendarLogic.monthGrid(for: displayedMonth, calendar: calendar)
+        let monthStart = grid.start
+        let recordedDays = Set(workouts.map(\.day))
+
+        return VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("運動カレンダー").font(.headline)
+                HStack(spacing: 4) {
+                    Button { changeDisplayedMonth(by: -1) } label: {
+                        Image(systemName: "chevron.left").frame(width: 28, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("前の月")
+                    Spacer(minLength: 0)
+                    Text(monthStart.formatted(.dateTime.year().month().locale(Locale(identifier: "ja_JP"))))
+                        .font(.subheadline.weight(.semibold))
+                        .fixedSize()
+                        .accessibilityAddTraits(.updatesFrequently)
+                    Spacer(minLength: 0)
+                    Button { changeDisplayedMonth(by: 1) } label: {
+                        Image(systemName: "chevron.right").frame(width: 28, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("次の月")
+                }
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 5) {
+                ForEach(["月", "火", "水", "木", "金", "土", "日"], id: \.self) { weekday in
+                    Text(weekday).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity).accessibilityLabel("\(weekday)曜日")
+                }
+                ForEach(0..<grid.cellCount, id: \.self) { index in
+                    let day = index - grid.weekdayOffset + 1
+                    if let date = WorkoutCalendarLogic.date(day: day, in: grid, calendar: calendar) {
+                        let dayKey = WorkoutCalendarLogic.dayKey(date, calendar: calendar)
+                        let hasWorkout = recordedDays.contains(dayKey)
+                        Button {
+                            selectedWorkoutDay = selectedWorkoutDay == dayKey ? nil : dayKey
+                        } label: {
+                            VStack(spacing: 1) {
+                                Text("\(day)").font(.system(.callout, design: .rounded).weight(selectedWorkoutDay == dayKey ? .bold : .regular))
+                                Circle().fill(hasWorkout ? MeleteStyle.accent : .clear).frame(width: 4, height: 4)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 29)
+                            .background {
+                                if selectedWorkoutDay == dayKey {
+                                    RoundedRectangle(cornerRadius: 7).fill(MeleteStyle.accent.opacity(0.18))
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(selectedWorkoutDay == dayKey ? MeleteStyle.accent : .primary)
+                        .accessibilityLabel("\(Self.displayDay(dayKey))、\(hasWorkout ? "運動記録あり" : "未記録")\(selectedWorkoutDay == dayKey ? "、選択中" : "、未選択")")
+                        .accessibilityAddTraits(selectedWorkoutDay == dayKey ? .isSelected : [])
+                        .help("\(Self.displayDay(dayKey))、\(hasWorkout ? "運動記録あり" : "未記録")")
+                    } else {
+                        Color.clear.frame(height: 29).accessibilityHidden(true)
+                    }
+                }
+            }
+            HStack(spacing: 7) {
+                Circle().fill(MeleteStyle.accent).frame(width: 7, height: 7)
+                Text("運動記録あり").foregroundStyle(.secondary)
+                Text("・日付を選択").foregroundStyle(.tertiary)
+                Spacer()
+            }.font(.caption)
+        }
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func changeDisplayedMonth(by amount: Int) {
+        guard let nextMonth = Self.workoutCalendar.date(byAdding: .month, value: amount, to: displayedMonth) else { return }
+        displayedMonth = nextMonth
+        selectedWorkoutDay = nil
+    }
+
+    private static var workoutCalendar: Calendar {
+        WorkoutCalendarLogic.calendar(timeZone: .current)
     }
 
     private var exerciseList: some View {
