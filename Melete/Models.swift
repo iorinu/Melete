@@ -84,6 +84,16 @@ struct WorkoutSetAdditionDrafts {
         items.append(draft)
     }
 
+    mutating func duplicate(id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        let source = items[index]
+        let copy = WorkoutSetAdditionDraft(
+            id: UUID(), recordID: source.recordID, exerciseID: source.exerciseID,
+            exerciseName: source.exerciseName, metrics: source.metrics, values: source.values
+        )
+        items.insert(copy, at: index + 1)
+    }
+
     mutating func cancel(id: UUID) {
         items.removeAll { $0.id == id }
     }

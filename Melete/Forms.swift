@@ -402,7 +402,8 @@ struct WorkoutValueEditForm: View {
                         }
                         ForEach(additions.items.filter { $0.recordID == record.id }) { addition in
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("追加セット（未保存）").font(.headline)
+                                let additionIndex = additions.items.filter { $0.recordID == record.id }.firstIndex(where: { $0.id == addition.id }) ?? 0
+                                Text("追加セット \(additionIndex + 1)（未保存）").font(.headline)
                                 if addition.metrics.isEmpty {
                                     Text("有効な項目がないため、この種目にはセットを追加できません。")
                                         .foregroundStyle(.red)
@@ -417,6 +418,11 @@ struct WorkoutValueEditForm: View {
                                 }
                                 Button("追加を取り消す", role: .destructive) {
                                     additions.cancel(id: addition.id)
+                                }
+                                if exercises.contains(where: { $0.id == record.exerciseID && !$0.isArchived }) {
+                                    Button("複製") { additions.duplicate(id: addition.id) }
+                                        .accessibilityLabel("追加セット \(additionIndex + 1)を複製")
+                                        .accessibilityIdentifier("duplicateAdditionSet_\(addition.id.uuidString)")
                                 }
                             }.padding(.vertical, 4)
                         }

@@ -498,7 +498,6 @@ final class MeleteTests: XCTestCase {
     func testWorkoutValueEditingSavesAdditionsAtomicallyAndReopensStore() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteWorkoutSetAddition-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: directory) }
         let schema = Schema(versionedSchema: MeleteSchemaV1.self)
         let configuration = ModelConfiguration("WorkoutSetAddition", schema: schema, url: directory.appendingPathComponent("test.store"), cloudKitDatabase: .none)
         var calendar = Calendar(identifier: .gregorian)
@@ -508,9 +507,11 @@ final class MeleteTests: XCTestCase {
         let editedDay = try XCTUnwrap(calendar.date(from: DateComponents(year: 2024, month: 2, day: 29, hour: 22)))
         let targetID = UUID()
         let metricID = UUID()
+        let optionalMetricID = UUID()
         let oldValueID = UUID()
         let createdWorkoutAt: Date
         let createdRecordAt: Date
+        var insertedSetIDs = Set<UUID>()
         let context: ModelContext
         let workout: Workout
         let record: ExerciseRecord
@@ -523,6 +524,7 @@ final class MeleteTests: XCTestCase {
             let required = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
             required.id = metricID
             let optional = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 1)
+            optional.id = optionalMetricID
             exercise = Exercise(name: "種目", metrics: [required, optional])
             oldValue = MetricValue(metric: required, scaledValue: 5_000)
             oldValue.id = oldValueID
@@ -541,26 +543,36 @@ final class MeleteTests: XCTestCase {
 
         var edits = WorkoutValueEditing.drafts(for: workout)
         edits[edits.firstIndex { $0.valueID == oldValueID }!].text = "6.25"
+        var additions = WorkoutSetAdditionDrafts()
         let firstDraft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
-        let secondDraft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
-        var first = firstDraft
-        first.values[first.metrics[0].id] = "0"
-        first.values[first.metrics[1].id] = ""
-        var second = secondDraft
-        second.values[second.metrics[0].id] = "7.5"
-        second.values[second.metrics[1].id] = "12"
+        let second = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+        additions.append(firstDraft)
+        additions.append(second)
+        additions.setValue("5", draftID: firstDraft.id, metricID: metricID)
+        additions.duplicate(id: firstDraft.id)
+        let copiedDraft = try XCTUnwrap(additions.items.first { $0.id != firstDraft.id && $0.recordID == firstDraft.recordID })
+        XCTAssertEqual(additions.value(draftID: copiedDraft.id, metricID: metricID), "5", "複製直後にraw入力をコピー")
+        additions.setValue("0", draftID: copiedDraft.id, metricID: metricID)
+        additions.setValue("", draftID: copiedDraft.id, metricID: optionalMetricID)
+        additions.setValue("7.5", draftID: second.id, metricID: metricID)
+        additions.setValue("12", draftID: second.id, metricID: optionalMetricID)
+        XCTAssertEqual(additions.items.map(\.id), [firstDraft.id, copiedDraft.id, second.id], "画面と同じ複製操作で直後に隣接挿入")
+        XCTAssertNotEqual(copiedDraft.id, firstDraft.id)
+        XCTAssertEqual(additions.value(draftID: firstDraft.id, metricID: metricID), "5", "複製後の入力変更は元に反映しない")
+        additions.cancel(id: firstDraft.id)
+        XCTAssertEqual(additions.items.map(\.id), [copiedDraft.id, second.id], "ID指定取消し後は残ったdraftだけ保存")
         XCTAssertEqual(record.sets.count, 1, "保存前はモデルに追加しない。キャンセル時も元のまま")
         XCTAssertEqual(oldValue.scaledValue, 5_000)
 
-        var invalidAddition = first
-        invalidAddition.values[first.metrics[0].id] = ""
+        var invalidAddition = copiedDraft
+        invalidAddition.values[metricID] = ""
         XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [invalidAddition], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) {})
-        invalidAddition.values[first.metrics[0].id] = "-1"
+        invalidAddition.values[metricID] = "-1"
         XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [invalidAddition], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) {})
-        invalidAddition.values[first.metrics[0].id] = "1.2345"
+        invalidAddition.values[metricID] = "1.2345"
         XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [invalidAddition], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) {})
-        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [first, first], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) {}, "追加draft重複を拒否")
-        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [first], day: now.addingTimeInterval(86_400), to: workout, exercises: [exercise], calendar: calendar, now: now) {}, "未来日を拒否")
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [copiedDraft, copiedDraft], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) {}, "追加draft重複を拒否")
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [copiedDraft], day: now.addingTimeInterval(86_400), to: workout, exercises: [exercise], calendar: calendar, now: now) {}, "未来日を拒否")
         XCTAssertEqual(record.sets.count, 1, "入力拒否のどの場合もモデルを変更しない")
         XCTAssertEqual(workout.day, Workout.dayString(from: originalDay, calendar: calendar))
         XCTAssertEqual(oldValue.scaledValue, 5_000)
@@ -575,7 +587,7 @@ final class MeleteTests: XCTestCase {
         let otherSet = SetRecord(sortOrder: 1, values: [unsavedOtherValue!])
         otherRecord.sets.append(otherSet)
         var discarded: [SetRecord] = []
-        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: [first, second], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now, discard: { set in discarded.append(set); context.delete(set) }) {
+        XCTAssertThrowsError(try WorkoutValueEditing.save(edits, additions: additions.items, day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now, discard: { set in discarded.append(set); context.delete(set) }) {
             throw NSError(domain: "InjectedSaveFailure", code: 1)
         })
         XCTAssertEqual(workout.day, originalStoredDay)
@@ -585,8 +597,9 @@ final class MeleteTests: XCTestCase {
         XCTAssertTrue(discarded.allSatisfy { $0.values.allSatisfy { $0.setRecord == nil } }, "失敗した新規Valueを孤児として残さない")
         XCTAssertEqual(record.sets.count, 1, "失敗時に追加セットを残さない")
 
-        try WorkoutValueEditing.save(edits, additions: [first, second], day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) { try context.save() }
+        try WorkoutValueEditing.save(edits, additions: additions.items, day: editedDay, to: workout, exercises: [exercise], calendar: calendar, now: now) { try context.save() }
         XCTAssertEqual(record.sets.sorted { $0.sortOrder < $1.sortOrder }.map(\.sortOrder), [2, 3, 4])
+        insertedSetIDs = Set(record.sets.filter { $0.sortOrder > 2 }.map(\.id))
         XCTAssertEqual(record.sets.filter { $0.sortOrder > 2 }.map(\.createdAt).count, 2)
         XCTAssertEqual(workout.createdAt, createdWorkoutAt)
         XCTAssertEqual(record.sets.first { $0.sortOrder == 2 }?.createdAt, createdRecordAt)
@@ -599,6 +612,9 @@ final class MeleteTests: XCTestCase {
         let savedRecord = try XCTUnwrap(saved.records.first)
         XCTAssertEqual(savedRecord.exerciseName, "種目")
         XCTAssertEqual(savedRecord.sets.map(\.sortOrder).sorted(), [2, 3, 4], "再試行で重複セットを作らない")
+        XCTAssertEqual(Set(savedRecord.sets.map(\.id)).count, 3)
+        XCTAssertEqual(Set(savedRecord.sets.filter { $0.sortOrder > 2 }.map(\.id)), insertedSetIDs, "生成された永続セットIDを再オープン後も保持")
+        XCTAssertEqual(insertedSetIDs.count, 2)
         XCTAssertEqual(savedRecord.sets.first { $0.sortOrder == 2 }?.values.first { $0.id == oldValueID }?.scaledValue, 6_250)
         let addedZero = try XCTUnwrap(savedRecord.sets.first { $0.sortOrder == 3 }?.values.first { $0.metricID == metricID })
         XCTAssertEqual(addedZero.scaledValue, 0, "0とnilを区別")
@@ -704,6 +720,35 @@ final class MeleteTests: XCTestCase {
         XCTAssertEqual(recordA.sets.first { $0.sortOrder == 2 }?.values.first?.scaledValue, 12_000)
         XCTAssertEqual(recordA.sets.first { $0.sortOrder == 3 }?.values.first?.scaledValue, 13_000)
         XCTAssertEqual(workout.day, Workout.dayString(from: editedDay, calendar: .current), "残ったdraftを保存し、日付変更も反映する")
+    }
+
+    func testWorkoutSetAdditionDraftDuplicationCopiesRawValuesAndInsertsByID() {
+        let metric = WorkoutSetMetricDraft(id: UUID(), name: "重量", unit: "kg", allowsDecimal: true, isRequired: false)
+        let recordA = UUID()
+        let recordB = UUID()
+        let first = WorkoutSetAdditionDraft(id: UUID(), recordID: recordA, exerciseID: UUID(), exerciseName: "種目A", metrics: [metric], values: [metric.id: " 1.2345 "])
+        let otherRecord = WorkoutSetAdditionDraft(id: UUID(), recordID: recordB, exerciseID: UUID(), exerciseName: "種目B", metrics: [metric], values: [:])
+        let next = WorkoutSetAdditionDraft(id: UUID(), recordID: recordA, exerciseID: first.exerciseID, exerciseName: first.exerciseName, metrics: first.metrics, values: [metric.id: ""])
+        var additions = WorkoutSetAdditionDrafts()
+        [first, otherRecord, next].forEach { additions.append($0) }
+
+        additions.duplicate(id: first.id)
+
+        let copy = additions.items[1]
+        XCTAssertEqual(additions.items.map(\.id), [first.id, copy.id, otherRecord.id, next.id])
+        XCTAssertNotEqual(copy.id, first.id)
+        XCTAssertEqual(copy.recordID, first.recordID)
+        XCTAssertEqual(copy.exerciseID, first.exerciseID)
+        XCTAssertEqual(copy.exerciseName, first.exerciseName)
+        XCTAssertEqual(copy.metrics, first.metrics)
+        XCTAssertEqual(copy.values, first.values)
+        additions.setValue("不正値", draftID: copy.id, metricID: metric.id)
+        XCTAssertEqual(additions.value(draftID: first.id, metricID: metric.id), " 1.2345 ")
+        XCTAssertEqual(additions.value(draftID: copy.id, metricID: metric.id), "不正値")
+        additions.cancel(id: first.id)
+        XCTAssertEqual(additions.items.map(\.id), [copy.id, otherRecord.id, next.id])
+        additions.duplicate(id: first.id)
+        XCTAssertEqual(additions.items.map(\.id), [copy.id, otherRecord.id, next.id])
     }
 
     func testWorkoutSetAdditionAllowsEmptyOptionalSetAndKeepsZeroDistinct() throws {
