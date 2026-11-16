@@ -3,6 +3,119 @@ import SwiftData
 @testable import Melete
 
 final class MeleteTests: XCTestCase {
+    func testV1SyntheticFixtureRoundTripsWithoutMigration() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteV1Fixture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("MeleteV1Fixture", schema: schema, url: directory.appendingPathComponent("fixture.sqlite"), cloudKitDatabase: .none)
+
+        let activeExerciseID = UUID()
+        let archivedExerciseID = UUID()
+        let metricIDs = [UUID(), UUID(), UUID()]
+        let workoutIDs = [UUID(), UUID()]
+        let firstSetID = UUID()
+        let secondSetID = UUID()
+        let archivedSetID = UUID()
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_123.25)
+
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+
+            let metricA = MetricDefinition(name: "旧重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 4)
+            metricA.id = metricIDs[0]
+            let metricB = MetricDefinition(name: "重量", unit: "lb", allowsDecimal: false, isRequired: false, sortOrder: 1)
+            metricB.id = metricIDs[1]
+            let metricC = MetricDefinition(name: "旧重量", unit: "kg", allowsDecimal: false, isRequired: false, sortOrder: 7)
+            metricC.id = metricIDs[2]
+            let activeExercise = Exercise(name: "種目", metrics: [metricA, metricB, metricC])
+            activeExercise.id = activeExerciseID
+
+            let archivedMetric = MetricDefinition(name: "距離", unit: "m", allowsDecimal: true, isRequired: false, sortOrder: 2)
+            let archivedExercise = Exercise(name: "アーカイブ済み", metrics: [archivedMetric])
+            archivedExercise.id = archivedExerciseID
+            archivedExercise.isArchived = true
+
+            let firstValues = [
+                MetricValue(metric: metricA, scaledValue: 82_500),
+                MetricValue(metric: metricB, scaledValue: nil),
+                MetricValue(metric: metricC, scaledValue: 0)
+            ]
+            // V1の保存値snapshotは、後に現在の定義が変わった想定でも保持できることを確認する。
+            firstValues[0].name = "記録時の名前"
+            firstValues[0].unit = "kg"
+            firstValues[0].allowsDecimal = true
+            firstValues[0].isRequired = false
+            let firstSet = SetRecord(sortOrder: 3, values: firstValues)
+            firstSet.id = firstSetID
+            firstSet.createdAt = createdAt
+            let secondSet = SetRecord(sortOrder: 8, values: [MetricValue(metric: metricA, scaledValue: 0)])
+            secondSet.id = secondSetID
+            let activeRecord = ExerciseRecord(exercise: activeExercise, sortOrder: 5, sets: [firstSet, secondSet])
+            let activeWorkout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [activeRecord])
+            activeWorkout.id = workoutIDs[0]
+
+            let archivedSet = SetRecord(sortOrder: 2, values: [MetricValue(metric: archivedMetric, scaledValue: nil)])
+            archivedSet.id = archivedSetID
+            let archivedRecord = ExerciseRecord(exercise: archivedExercise, sortOrder: 6, sets: [archivedSet])
+            let archivedWorkout = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [archivedRecord])
+            archivedWorkout.id = workoutIDs[1]
+
+            context.insert(activeExercise)
+            context.insert(archivedExercise)
+            context.insert(activeWorkout)
+            context.insert(archivedWorkout)
+            try context.save()
+        }
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(reopened)
+        let workouts = try context.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(workouts.map(\.id)), Set(workoutIDs))
+
+        let activeWorkout = try XCTUnwrap(workouts.first { $0.id == workoutIDs[0] })
+        let activeRecord = try XCTUnwrap(activeWorkout.records.first)
+        XCTAssertEqual(activeRecord.sortOrder, 5)
+        let sets = activeRecord.sets.sorted { $0.sortOrder < $1.sortOrder }
+        XCTAssertEqual(sets.map(\.sortOrder), [3, 8])
+        XCTAssertEqual(sets[0].id, firstSetID)
+        XCTAssertEqual(sets[0].createdAt, createdAt)
+        let oldSnapshots = Dictionary(uniqueKeysWithValues: sets[0].values.map { ($0.metricID, $0) })
+        let oldWeight = try XCTUnwrap(oldSnapshots[metricIDs[0]])
+        XCTAssertEqual(oldWeight.name, "記録時の名前")
+        XCTAssertEqual(oldWeight.unit, "kg")
+        XCTAssertTrue(oldWeight.allowsDecimal)
+        XCTAssertFalse(oldWeight.isRequired)
+        XCTAssertEqual(oldWeight.scaledValue, 82_500)
+        let poundSnapshot = try XCTUnwrap(oldSnapshots[metricIDs[1]])
+        XCTAssertEqual(poundSnapshot.name, "重量")
+        XCTAssertEqual(poundSnapshot.unit, "lb")
+        XCTAssertFalse(poundSnapshot.allowsDecimal)
+        XCTAssertFalse(poundSnapshot.isRequired)
+        XCTAssertNil(poundSnapshot.scaledValue)
+        let zeroSnapshot = try XCTUnwrap(oldSnapshots[metricIDs[2]])
+        XCTAssertEqual(zeroSnapshot.name, "旧重量")
+        XCTAssertEqual(zeroSnapshot.unit, "kg")
+        XCTAssertFalse(zeroSnapshot.allowsDecimal)
+        XCTAssertFalse(zeroSnapshot.isRequired)
+        XCTAssertEqual(zeroSnapshot.scaledValue, 0)
+        XCTAssertEqual(sets[1].sortOrder, 8)
+        XCTAssertEqual(sets[1].values.first?.metricID, metricIDs[0])
+        XCTAssertEqual(sets[1].values.first?.scaledValue, 0)
+
+        let archivedWorkout = try XCTUnwrap(workouts.first { $0.id == workoutIDs[1] })
+        let archivedRecord = try XCTUnwrap(archivedWorkout.records.first)
+        XCTAssertEqual(archivedRecord.sortOrder, 6)
+        XCTAssertEqual(archivedRecord.sets.first?.id, archivedSetID)
+        let exercises = try context.fetch(FetchDescriptor<Exercise>())
+        let archivedExercise = try XCTUnwrap(exercises.first { $0.id == archivedExerciseID })
+        XCTAssertTrue(archivedExercise.isArchived)
+        XCTAssertEqual(archivedExercise.metrics.first?.sortOrder, 2)
+        let activeExercise = try XCTUnwrap(exercises.first { $0.id == activeExerciseID })
+        XCTAssertFalse(activeExercise.isArchived)
+        XCTAssertEqual(activeExercise.metrics.sorted { $0.sortOrder < $1.sortOrder }.map(\.id), [metricIDs[1], metricIDs[0], metricIDs[2]])
+    }
+
     func testMetricDefinitionEditingAddsAndTogglesWithoutChangingSnapshots() throws {
         let existing = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
         let exercise = Exercise(name: "種目", metrics: [existing])
@@ -1345,5 +1458,179 @@ final class MeleteTests: XCTestCase {
         XCTAssertEqual(Set(try reopened.fetch(FetchDescriptor<Workout>()).map(\.id)), [survivingWorkout.id, sharedWorkout.id], "再オープン後は保護対象Workoutのみ")
         XCTAssertEqual(try reopened.fetch(FetchDescriptor<ExerciseRecord>()).count, 2)
         XCTAssertEqual(try reopened.fetch(FetchDescriptor<SetRecord>()).count, 2)
+    }
+}
+
+// 移行実験専用モデル。実運用のMeleteSchemaV1と同名の永続モデル名を使わず、
+// 実運用スキーマやfixtureを変更せずにSwiftDataの移行機構を隔離して調べる。
+enum RevisionSpikeSchemaV1: VersionedSchema {
+    static var versionIdentifier = Schema.Version(1, 0, 0)
+    static var models: [any PersistentModel.Type] { [Exercise.self, Record.self, SetEntry.self, Value.self] }
+
+    @Model final class Exercise {
+        var id: UUID
+        var name: String
+        @Relationship(deleteRule: .cascade, inverse: \Record.exercise) var records: [Record]
+        init(id: UUID, name: String, records: [Record] = []) { self.id = id; self.name = name; self.records = records }
+    }
+    @Model final class Record {
+        var id: UUID
+        var exerciseName: String
+        var sortOrder: Int
+        var day: Date
+        var exercise: Exercise?
+        @Relationship(deleteRule: .cascade, inverse: \SetEntry.record) var sets: [SetEntry]
+        init(id: UUID, exerciseName: String, sortOrder: Int, day: Date, sets: [SetEntry] = []) {
+            self.id = id; self.exerciseName = exerciseName; self.sortOrder = sortOrder; self.day = day; self.sets = sets
+        }
+    }
+    @Model final class SetEntry {
+        var id: UUID
+        var sortOrder: Int
+        var createdAt: Date
+        var record: Record?
+        @Relationship(deleteRule: .cascade, inverse: \Value.set) var values: [Value]
+        init(id: UUID, sortOrder: Int, createdAt: Date, values: [Value] = []) {
+            self.id = id; self.sortOrder = sortOrder; self.createdAt = createdAt; self.values = values
+        }
+    }
+    @Model final class Value {
+        var id: UUID
+        var metricID: UUID
+        var name: String
+        var unit: String
+        var allowsDecimal: Bool
+        var isRequired: Bool
+        var scaledValue: Int64?
+        var set: SetEntry?
+        init(id: UUID, metricID: UUID, name: String, unit: String, allowsDecimal: Bool, isRequired: Bool, scaledValue: Int64?) {
+            self.id = id; self.metricID = metricID; self.name = name; self.unit = unit
+            self.allowsDecimal = allowsDecimal; self.isRequired = isRequired; self.scaledValue = scaledValue
+        }
+    }
+}
+
+enum RevisionSpikeSchemaV2: VersionedSchema {
+    static var versionIdentifier = Schema.Version(2, 0, 0)
+    static var models: [any PersistentModel.Type] { [Exercise.self, Record.self, SetEntry.self, Value.self] }
+
+    @Model final class Exercise {
+        var id: UUID
+        var name: String
+        @Relationship(deleteRule: .cascade, inverse: \Record.exercise) var records: [Record]
+        init(id: UUID, name: String, records: [Record] = []) { self.id = id; self.name = name; self.records = records }
+    }
+    @Model final class Record {
+        var id: UUID
+        var exerciseName: String
+        var sortOrder: Int
+        var day: Date
+        var exercise: Exercise?
+        @Relationship(deleteRule: .cascade, inverse: \SetEntry.record) var sets: [SetEntry]
+        init(id: UUID, exerciseName: String, sortOrder: Int, day: Date, sets: [SetEntry] = []) {
+            self.id = id; self.exerciseName = exerciseName; self.sortOrder = sortOrder; self.day = day; self.sets = sets
+        }
+    }
+    @Model final class SetEntry {
+        var id: UUID
+        var sortOrder: Int
+        var createdAt: Date
+        var record: Record?
+        @Relationship(deleteRule: .cascade, inverse: \Value.set) var values: [Value]
+        init(id: UUID, sortOrder: Int, createdAt: Date, values: [Value] = []) {
+            self.id = id; self.sortOrder = sortOrder; self.createdAt = createdAt; self.values = values
+        }
+    }
+    @Model final class Value {
+        var id: UUID
+        var metricID: UUID
+        var name: String
+        var unit: String
+        var allowsDecimal: Bool
+        var isRequired: Bool
+        var scaledValue: Int64?
+        var revisionID: UUID?
+        var set: SetEntry?
+        init(id: UUID, metricID: UUID, name: String, unit: String, allowsDecimal: Bool, isRequired: Bool, scaledValue: Int64?, revisionID: UUID? = nil) {
+            self.id = id; self.metricID = metricID; self.name = name; self.unit = unit
+            self.allowsDecimal = allowsDecimal; self.isRequired = isRequired; self.scaledValue = scaledValue; self.revisionID = revisionID
+        }
+    }
+}
+
+enum RevisionSpikeMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] { [RevisionSpikeSchemaV1.self, RevisionSpikeSchemaV2.self] }
+    static var stages: [MigrationStage] { [.lightweight(fromVersion: RevisionSpikeSchemaV1.self, toVersion: RevisionSpikeSchemaV2.self)] }
+}
+
+extension MeleteTests {
+    func testRevisionSpikeMigratesSyntheticV1StoreToV2() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteRevisionSpike-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let storeURL = directory.appendingPathComponent("revision-spike.store")
+        let v1Schema = Schema(versionedSchema: RevisionSpikeSchemaV1.self)
+        let v2Schema = Schema(versionedSchema: RevisionSpikeSchemaV2.self)
+        let v1Configuration = ModelConfiguration("RevisionSpike", schema: v1Schema, url: storeURL, cloudKitDatabase: .none)
+        let v2Configuration = ModelConfiguration("RevisionSpike", schema: v2Schema, url: storeURL, cloudKitDatabase: .none)
+
+        let exerciseID = UUID(), recordID = UUID(), setID = UUID()
+        let metricIDs = [UUID(), UUID()]
+        let valueIDs = [UUID(), UUID()]
+        let day = Date(timeIntervalSince1970: 1_700_000_000.125)
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_123.25)
+        do {
+            let container = try ModelContainer(for: v1Schema, configurations: [v1Configuration])
+            let context = ModelContext(container)
+            let values = [
+                RevisionSpikeSchemaV1.Value(id: valueIDs[0], metricID: metricIDs[0], name: "旧snapshot名", unit: "kg", allowsDecimal: true, isRequired: false, scaledValue: nil),
+                RevisionSpikeSchemaV1.Value(id: valueIDs[1], metricID: metricIDs[1], name: "重量", unit: "lb", allowsDecimal: false, isRequired: true, scaledValue: 0)
+            ]
+            let set = RevisionSpikeSchemaV1.SetEntry(id: setID, sortOrder: 7, createdAt: createdAt, values: values)
+            let record = RevisionSpikeSchemaV1.Record(id: recordID, exerciseName: "記録時の種目名", sortOrder: 3, day: day, sets: [set])
+            let exercise = RevisionSpikeSchemaV1.Exercise(id: exerciseID, name: "現在の種目名", records: [record])
+            context.insert(exercise)
+            try context.save()
+        }
+
+        let migrated = try ModelContainer(for: v2Schema, migrationPlan: RevisionSpikeMigrationPlan.self, configurations: [v2Configuration])
+        let context = ModelContext(migrated)
+        let exercises = try context.fetch(FetchDescriptor<RevisionSpikeSchemaV2.Exercise>())
+        let exercise = try XCTUnwrap(exercises.first { $0.id == exerciseID })
+        XCTAssertEqual(exercises.count, 1)
+        XCTAssertEqual(exercise.name, "現在の種目名")
+        let record = try XCTUnwrap(exercise.records.first)
+        XCTAssertEqual(record.id, recordID)
+        XCTAssertEqual(record.exercise, exercise)
+        XCTAssertEqual(record.exerciseName, "記録時の種目名")
+        XCTAssertEqual(record.sortOrder, 3)
+        XCTAssertEqual(record.day, day)
+        let set = try XCTUnwrap(record.sets.first)
+        XCTAssertEqual(set.id, setID)
+        XCTAssertEqual(set.record, record)
+        XCTAssertEqual(set.sortOrder, 7)
+        XCTAssertEqual(set.createdAt, createdAt)
+        XCTAssertEqual(Set(set.values.map(\.id)), Set(valueIDs))
+        for (id, metricID, name, unit, decimal, required, value) in [
+            (valueIDs[0], metricIDs[0], "旧snapshot名", "kg", true, false, nil as Int64?),
+            (valueIDs[1], metricIDs[1], "重量", "lb", false, true, 0 as Int64?)
+        ] {
+            let saved = try XCTUnwrap(set.values.first { $0.id == id })
+            XCTAssertEqual(saved.set, set)
+            XCTAssertEqual(saved.metricID, metricID)
+            XCTAssertEqual(saved.name, name)
+            XCTAssertEqual(saved.unit, unit)
+            XCTAssertEqual(saved.allowsDecimal, decimal)
+            XCTAssertEqual(saved.isRequired, required)
+            XCTAssertEqual(saved.scaledValue, value)
+            XCTAssertNil(saved.revisionID, "V1のsnapshotからrevisionを推定しない")
+        }
+
+        let reopened = try ModelContainer(for: v2Schema, migrationPlan: RevisionSpikeMigrationPlan.self, configurations: [v2Configuration])
+        let reopenedContext = ModelContext(reopened)
+        let reopenedValue = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<RevisionSpikeSchemaV2.Value>()).first { $0.id == valueIDs[0] })
+        XCTAssertNil(reopenedValue.revisionID, "再open後もlegacy分類のnilを保持")
+        XCTAssertEqual(reopenedValue.name, "旧snapshot名")
+        XCTAssertEqual(reopenedValue.unit, "kg")
+        XCTAssertNil(reopenedValue.scaledValue)
     }
 }
