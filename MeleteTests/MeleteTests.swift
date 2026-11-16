@@ -2,7 +2,926 @@ import XCTest
 import SwiftData
 @testable import Melete
 
+// revision導入候補。旧MetricDefinitionにrevisionを推定付与せず、将来の履歴は独立した行で表す。
+@Model private final class MetricDefinitionRevisionCandidate {
+    var id: UUID
+    var metricID: UUID
+    var name: String
+    var unit: String
+    var allowsDecimal: Bool
+    var isRequired: Bool
+    var revision: Int
+
+    init(id: UUID, metricID: UUID, name: String, unit: String, allowsDecimal: Bool, isRequired: Bool, revision: Int) {
+        self.id = id
+        self.metricID = metricID
+        self.name = name
+        self.unit = unit
+        self.allowsDecimal = allowsDecimal
+        self.isRequired = isRequired
+        self.revision = revision
+    }
+}
+
+private enum MeleteRevisionSpikeSchemaV2: VersionedSchema {
+    static var versionIdentifier = Schema.Version(2, 0, 0)
+    // V1の実model型をそのまま使い、追加entityだけをテスト候補として加える。
+    static var models: [any PersistentModel.Type] {
+        MeleteSchemaV1.models + [MetricDefinitionRevisionCandidate.self]
+    }
+}
+
+private enum MeleteRevisionSpikeMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] { [MeleteSchemaV1.self, MeleteRevisionSpikeSchemaV2.self] }
+    static var stages: [MigrationStage] {
+        [MigrationStage.lightweight(fromVersion: MeleteSchemaV1.self, toVersion: MeleteRevisionSpikeSchemaV2.self)]
+    }
+}
+
+private enum MeleteFailingMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] { [MeleteSchemaV1.self, MeleteRevisionSpikeSchemaV2.self] }
+    static var stages: [MigrationStage] {
+        [MigrationStage.custom(
+            fromVersion: MeleteSchemaV1.self,
+            toVersion: MeleteRevisionSpikeSchemaV2.self,
+            willMigrate: { _ in throw InjectedMigrationFailure.expected },
+            didMigrate: nil
+        )]
+    }
+}
+
+private enum InjectedMigrationFailure: Error {
+    case expected
+}
+
 final class MeleteTests: XCTestCase {
+    private func makeCandidateV2Context() throws -> ModelContext {
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteCandidateV2ReadOnlyReview-\(UUID().uuidString).sqlite")
+        let configuration = ModelConfiguration("MeleteCandidateV2ReadOnlyReview", schema: schema, url: url, cloudKitDatabase: .none)
+        return ModelContext(try ModelContainer(for: schema, configurations: [configuration]))
+    }
+
+    func testCandidateV2AppBoundaryValidatesBeforeInsertingRevisionLink() throws {
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let value = MetricValue(metric: metric, scaledValue: 1_000)
+        let revision = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        context.insert(metric)
+        context.insert(value)
+        context.insert(revision)
+
+        let absentValue = MetricValue(metric: metric, scaledValue: nil)
+        XCTAssertThrowsError(try MetricValueRevisionLinking.register(value: absentValue, revision: revision, in: context))
+        XCTAssertThrowsError(try MetricValueRevisionLinking.register(value: value, revision: MetricDefinitionRevision(metricID: metric.id, revision: 2, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0), in: context))
+
+        let otherMetricRevision = MetricDefinitionRevision(metricID: UUID(), revision: 1, name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 1)
+        context.insert(otherMetricRevision)
+        XCTAssertThrowsError(try MetricValueRevisionLinking.register(value: value, revision: otherMetricRevision, in: context))
+
+        context.insert(MetricValueRevisionLink(valueID: value.id, revisionID: revision.id))
+        XCTAssertThrowsError(try MetricValueRevisionLinking.register(value: value, revision: revision, in: context))
+        context.delete(try XCTUnwrap(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).first))
+
+        let duplicatePair = MetricDefinitionRevision(metricID: metric.id, revision: revision.revision, name: "重量の重複", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        context.insert(duplicatePair)
+        XCTAssertThrowsError(try MetricValueRevisionLinking.register(value: value, revision: duplicatePair, in: context))
+        context.delete(duplicatePair)
+
+        let link = try MetricValueRevisionLinking.register(value: value, revision: revision, in: context)
+        XCTAssertEqual(link.valueID, value.id)
+        XCTAssertEqual(link.revisionID, revision.id)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).count, 1)
+    }
+
+    @MainActor func testCandidateV2LinkDoesNotBecomeOrphanWhenMetricValueIsDeleted() throws {
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let value = MetricValue(metric: metric, scaledValue: 1_000)
+        let revision = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "削除対象", metrics: [metric])
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [value])])
+        let workout = Workout(day: .now, records: [record])
+        context.insert(exercise)
+        context.insert(workout)
+        context.insert(revision)
+        _ = try MetricValueRevisionLinking.register(value: value, revision: revision, in: context)
+        try context.save()
+
+        try WorkoutDeletionV2.delete(workoutID: workout.id, in: context)
+
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty, "値の削除で対応するrevision linkも削除されるべき")
+    }
+
+    func testCandidateV2RejectsDuplicateValueLinksAndMetricRevisionPairs() throws {
+        let context = try makeCandidateV2Context()
+        let metricID = UUID()
+        let revision = MetricDefinitionRevision(metricID: metricID, revision: 1, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let duplicateRevisionPair = [
+            revision,
+            MetricDefinitionRevision(metricID: metricID, revision: 1, name: "重量(複製)", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        ]
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let value = MetricValue(metric: metric, scaledValue: 1)
+        let exercise = Exercise(name: "重複検査", metrics: [metric])
+        context.insert(exercise)
+        context.insert(value)
+        context.insert(revision)
+        duplicateRevisionPair.dropFirst().forEach(context.insert)
+        XCTAssertThrowsError(try MetricValueRevisionLinking.register(value: value, revision: revision, in: context), "重複改定番号をアプリ境界で拒否")
+    }
+
+    func testCandidateV2RejectsLinkToRevisionOfDifferentMetric() throws {
+        let context = try makeCandidateV2Context()
+        let firstMetric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let value = MetricValue(metric: firstMetric, scaledValue: 1_000)
+        let otherRevision = MetricDefinitionRevision(metricID: UUID(), revision: 1, name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 0)
+        context.insert(firstMetric)
+        context.insert(value)
+        context.insert(otherRevision)
+        XCTAssertThrowsError(try MetricValueRevisionLinking.register(value: value, revision: otherRevision, in: context), "値とrevisionのmetricIDが一致しないリンクをアプリ境界で拒否")
+    }
+
+    @MainActor func testCandidateV2BothWorkoutValueCreationPathsCreateRevisionLinks() throws {
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let revision = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+        context.insert(exercise)
+        context.insert(revision)
+
+        var initialEntry = WorkoutEntryDraft(exercise: exercise)
+        initialEntry.sets[0].values[metric.id] = "1"
+        guard case .success(let validated) = WorkoutSetDraftEditing.validatedEntries([initialEntry]) else {
+            return XCTFail("新規Workoutの入力を検証できる")
+        }
+        let workout = Workout(day: .now, records: MainView.workoutRecords(from: validated))
+        context.insert(workout)
+        try context.save()
+        let initialValues = workout.records.flatMap(\.sets).flatMap(\.values)
+        let day = try XCTUnwrap(WorkoutValueEditing.date(from: workout.day))
+        let addition = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: workout.records[0], exercise: exercise))
+        var filledAddition = addition
+        filledAddition.values[metric.id] = "2"
+        try WorkoutValueEditingV2.save([], additions: [filledAddition], day: day, to: workout, exercises: [exercise], in: context)
+
+        let values = workout.records.flatMap(\.sets).flatMap(\.values)
+        XCTAssertEqual(values.count, 2)
+        let links = try context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(links.map(\.valueID), [values.last!.id], "既存Workoutへの追加値だけにrevision linkが必要")
+        XCTAssertFalse(links.contains { initialValues.map(\.id).contains($0.valueID) }, "既存のlegacy値にrevisionを後付けしない")
+        XCTAssertEqual(initialValues.count, 1)
+    }
+
+    @MainActor func testV2ExistingWorkoutAdditionPersistsOnlyNewValuesAndMatchingRevisions() throws {
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteV2ExistingWorkout-\(UUID().uuidString).sqlite")
+        let configuration = ModelConfiguration("MeleteV2ExistingWorkout", schema: schema, url: url, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+        let metricA = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let metricB = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 1)
+        let metricC = MetricDefinition(name: "距離", unit: "m", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exerciseA = Exercise(name: "合成種目A", metrics: [metricA, metricB])
+        let exerciseB = Exercise(name: "合成種目B", metrics: [metricC])
+        let legacyA = MetricValue(metric: metricA, scaledValue: 0)
+        let legacyNil = MetricValue(metric: metricB, scaledValue: nil)
+        let legacyB = MetricValue(metric: metricC, scaledValue: 12_500)
+        let recordA = ExerciseRecord(exercise: exerciseA, sortOrder: 4, sets: [SetRecord(sortOrder: 2, values: [legacyA, legacyNil])])
+        let recordB = ExerciseRecord(exercise: exerciseB, sortOrder: 8, sets: [SetRecord(sortOrder: 5, values: [legacyB])])
+        let workout = Workout(day: .now, records: [recordA, recordB])
+        let otherValue = MetricValue(metric: metricA, scaledValue: 77_000)
+        let otherWorkout = Workout(day: .now, records: [ExerciseRecord(exercise: exerciseA, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [otherValue])])])
+        let oldRevision = MetricDefinitionRevision(metricID: metricA.id, revision: 3, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 6)
+        context.insert(exerciseA); context.insert(exerciseB); context.insert(workout); context.insert(otherWorkout); context.insert(oldRevision)
+        try context.save()
+
+        var additions = WorkoutSetAdditionDrafts()
+        let additionA1 = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordA, exercise: exerciseA))
+        let additionA2 = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordA, exercise: exerciseA))
+        let additionB = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordB, exercise: exerciseB))
+        additions.append(additionA1); additions.append(additionA2); additions.append(additionB)
+        additions.setValue("2.5", draftID: additionA1.id, metricID: metricA.id)
+        additions.setValue("", draftID: additionA1.id, metricID: metricB.id)
+        additions.setValue("3", draftID: additionA2.id, metricID: metricA.id)
+        additions.setValue("4", draftID: additionA2.id, metricID: metricB.id)
+        additions.setValue("0", draftID: additionB.id, metricID: metricC.id)
+        let originalLegacy = [legacyA, legacyNil, legacyB].map(WorkoutValueSnapshot.init)
+        let day = try XCTUnwrap(WorkoutValueEditing.date(from: workout.day))
+        try WorkoutValueEditingV2.save([], additions: additions.items, day: day, to: workout, exercises: [exerciseA, exerciseB], in: context)
+
+        XCTAssertEqual(recordA.sets.map(\.sortOrder).sorted(), [2, 3, 4])
+        XCTAssertEqual(recordB.sets.count, 2)
+        XCTAssertEqual(recordB.sets.map(\.sortOrder).sorted(), [5, 6])
+        XCTAssertEqual([legacyA, legacyNil, legacyB].map(WorkoutValueSnapshot.init), originalLegacy)
+        let revisions = try context.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        XCTAssertEqual(revisions.count, 3)
+        let revisionA = try XCTUnwrap(revisions.first { $0.metricID == metricA.id })
+        XCTAssertEqual(revisionA.revision, 3)
+        XCTAssertEqual(revisionA.name, oldRevision.name)
+        let revisionB = try XCTUnwrap(revisions.first { $0.metricID == metricB.id })
+        XCTAssertEqual(revisionB.revision, 1)
+        let revisionC = try XCTUnwrap(revisions.first { $0.metricID == metricC.id })
+        XCTAssertEqual(revisionC.revision, 1)
+        let additionsByMetric = workout.records.flatMap(\.sets).flatMap(\.values).filter { ![legacyA.id, legacyNil.id, legacyB.id].contains($0.id) }
+        let links = try context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(links.count, additionsByMetric.count)
+        for value in additionsByMetric {
+            let link = try XCTUnwrap(links.first { $0.valueID == value.id })
+            XCTAssertEqual(link.revisionID, [revisionA, revisionB, revisionC].first { $0.metricID == value.metricID }?.id)
+        }
+        XCTAssertFalse(links.contains { [legacyA.id, legacyNil.id, legacyB.id].contains($0.valueID) })
+        XCTAssertEqual(additionsByMetric.first { $0.metricID == metricB.id && $0.scaledValue == nil }?.scaledValue, nil)
+        XCTAssertTrue(additionsByMetric.contains { $0.metricID == metricC.id && $0.scaledValue == 0 })
+        XCTAssertEqual(otherWorkout.records.first?.sets.first?.values.first?.scaledValue, 77_000)
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let savedWorkout = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workout.id })
+        XCTAssertEqual(savedWorkout.records.first { $0.id == recordA.id }?.sets.map(\.sortOrder).sorted(), [2, 3, 4])
+        XCTAssertEqual(savedWorkout.records.first { $0.id == recordB.id }?.sets.map(\.sortOrder).sorted(), [5, 6])
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).count, 5)
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == otherWorkout.id }?.records.first?.sets.first?.values.first?.scaledValue, 77_000)
+    }
+
+    @MainActor func testV2SavesRejectMismatchedCurrentRevisionBeforeChangingContext() throws {
+        for mismatch in ["metric-name", "metric-unit", "metric-decimal", "metric-required", "revision-name", "revision-unit", "revision-decimal", "revision-required"] {
+            let context = try makeCandidateV2Context()
+            let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+            switch mismatch {
+            case "metric-name": metric.name = "metric不一致"
+            case "metric-unit": metric.unit = "lb"
+            case "metric-decimal": metric.allowsDecimal = false
+            case "metric-required": metric.isRequired = true
+            default: break
+            }
+            let exercise = Exercise(name: "合成種目", metrics: [metric])
+            let revision = MetricDefinitionRevision(metricID: metric.id, revision: 2, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 8)
+            switch mismatch {
+            case "revision-name": revision.name = "revision不一致"
+            case "revision-unit": revision.unit = "lb"
+            case "revision-decimal": revision.allowsDecimal = false
+            case "revision-required": revision.isRequired = true
+            default: break
+            }
+            context.insert(exercise); context.insert(revision); try context.save()
+            XCTAssertFalse(context.hasChanges)
+
+            var entry = WorkoutEntryDraft(exercise: exercise)
+            entry.sets[0].values[metric.id] = "1"
+            guard case let .success(entries) = WorkoutSetDraftEditing.validatedEntries([entry]) else { return XCTFail("入力を検証できる") }
+            XCTAssertThrowsError(try WorkoutCreationV2.save(day: .now, entries: entries, in: context), "新規Workout: \(mismatch)") { error in
+                guard case MetricValueRevisionLinkingError.snapshotMismatch = error else { return XCTFail("snapshot不一致の明示エラーが必要: \(error)") }
+            }
+            XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).isEmpty)
+            XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValue>()).isEmpty)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [revision.id])
+            XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+            XCTAssertFalse(context.hasChanges, "拒否時に新規保存データを残さない")
+
+            let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 4, values: [MetricValue(metric: metric, scaledValue: 1)])])
+            let workout = Workout(day: .now, records: [record])
+            context.insert(workout); try context.save()
+            let addition = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+            XCTAssertThrowsError(try WorkoutValueEditingV2.save([], additions: [addition], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context), "既存Workout追加: \(mismatch)") { error in
+                guard case MetricValueRevisionLinkingError.snapshotMismatch = error else { return XCTFail("snapshot不一致の明示エラーが必要: \(error)") }
+            }
+            XCTAssertEqual(record.sets.map(\.sortOrder), [4])
+            XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [revision.id])
+            XCTAssertFalse(context.hasChanges, "拒否時に追加値・revision/linkを残さない")
+        }
+    }
+
+    func testV2RevisionLinkingRequiresMatchingValueAndRevisionSnapshots() throws {
+        for mismatch in ["name", "unit", "decimal", "required"] {
+            let context = try makeCandidateV2Context()
+            let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+            let value = MetricValue(metric: metric, scaledValue: 1)
+            let revision = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 9)
+            switch mismatch {
+            case "name": value.name = "別名"
+            case "unit": value.unit = "lb"
+            case "decimal": value.allowsDecimal = false
+            default: value.isRequired = true
+            }
+            context.insert(metric); context.insert(value); context.insert(revision)
+            XCTAssertThrowsError(try MetricValueRevisionLinking.register(value: value, revision: revision, in: context), "値snapshot不一致: \(mismatch)") { error in
+                guard case MetricValueRevisionLinkingError.snapshotMismatch = error else { return XCTFail("snapshot不一致の明示エラーが必要: \(error)") }
+            }
+            XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+        }
+    }
+
+    @MainActor func testV2ExistingWorkoutAdditionRejectsChangedMissingArchivedDefinitionsAndDirtyContext() throws {
+        for rejection in ["changed", "missing", "archived"] {
+            let context = try makeCandidateV2Context()
+            let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+            let exercise = Exercise(name: "合成種目", metrics: [metric])
+            let value = MetricValue(metric: metric, scaledValue: 10)
+            let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 2, values: [value])])
+            let workout = Workout(day: .now, records: [record])
+            context.insert(exercise); context.insert(workout); try context.save()
+            let draft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+            var changedDraft = draft
+            changedDraft.values[metric.id] = "20"
+            switch rejection {
+            case "changed": metric.name = "変更後"
+            case "missing": exercise.metrics.removeAll { $0.id == metric.id }
+            default: exercise.isArchived = true
+            }
+            XCTAssertThrowsError(try WorkoutValueEditingV2.save([], additions: [changedDraft], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context))
+            XCTAssertEqual(record.sets.map(\.sortOrder), [2])
+            XCTAssertEqual(value.scaledValue, 10)
+            XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+            XCTAssertTrue(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).isEmpty)
+        }
+
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "dirty", metrics: [metric])
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 1)])])
+        let workout = Workout(day: .now, records: [record])
+        context.insert(exercise); context.insert(workout); try context.save()
+        let draft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+        metric.name = "未保存変更"
+        XCTAssertThrowsError(try WorkoutValueEditingV2.save([], additions: [draft], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context))
+        XCTAssertTrue(context.hasChanges, "拒否時に呼び出し元のdirty contextをsave/rollbackしない")
+        XCTAssertEqual(record.sets.count, 1)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).isEmpty)
+    }
+
+    @MainActor func testV2ExistingWorkoutAdditionInjectedPersistFailureRemovesOnlyNewGraph() throws {
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteV2ExistingWorkoutFailure-\(UUID().uuidString).sqlite")
+        let configuration = ModelConfiguration("MeleteV2ExistingWorkoutFailure", schema: schema, url: url, cloudKitDatabase: .none)
+        let context = ModelContext(try ModelContainer(for: schema, configurations: [configuration]))
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let legacy = MetricValue(metric: metric, scaledValue: 9_000)
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 4, values: [legacy])])
+        let workout = Workout(day: .now, records: [record])
+        let other = Workout(day: .now, records: [ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 8_000)])])])
+        let revision = MetricDefinitionRevision(metricID: metric.id, revision: 2, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        context.insert(exercise); context.insert(workout); context.insert(other); context.insert(revision); try context.save()
+        XCTAssertFalse(context.hasChanges, "注入失敗を試す前はcontextがclean")
+        let draft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+        var filled = draft
+        filled.values[metric.id] = "10"
+        let oldDay = workout.day
+        let oldLegacyValue = legacy.scaledValue
+        XCTAssertThrowsError(try WorkoutValueEditingV2.save([], additions: [filled], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context) { _ in throw InjectedMigrationFailure.expected })
+        XCTAssertEqual(workout.day, oldDay)
+        XCTAssertEqual(record.sets.map(\.sortOrder), [4])
+        XCTAssertEqual(legacy.scaledValue, oldLegacyValue)
+        XCTAssertEqual(other.records.first?.sets.first?.values.first?.scaledValue, 8_000)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [revision.id])
+        XCTAssertFalse(context.hasChanges, "注入例外後は追加graphの変更が残らない")
+
+        // 後続の無関係なsaveが失敗時のrevision/link/追加値を誤って永続化しないことを確認。
+        let unrelatedMetric = MetricDefinition(name: "無関係", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 1)
+        context.insert(Exercise(name: "無関係", metrics: [unrelatedMetric]))
+        try context.save()
+        let afterUnrelatedSave = try ModelContainer(for: schema, configurations: [configuration])
+        let afterUnrelatedSaveContext = ModelContext(afterUnrelatedSave)
+        XCTAssertEqual(try afterUnrelatedSaveContext.fetch(FetchDescriptor<MetricValue>()).count, 2)
+        XCTAssertTrue(try afterUnrelatedSaveContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+        XCTAssertEqual(try afterUnrelatedSaveContext.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [revision.id])
+        XCTAssertEqual(try afterUnrelatedSaveContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workout.id }?.records.first?.sets.map(\.sortOrder), [4])
+
+        // 失敗後も同じ値で再試行できる。
+        try WorkoutValueEditingV2.save([], additions: [filled], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context)
+        XCTAssertFalse(context.hasChanges)
+        XCTAssertEqual(record.sets.map(\.sortOrder).sorted(), [4, 5])
+        let afterRetry = try ModelContainer(for: schema, configurations: [configuration])
+        let afterRetryContext = ModelContext(afterRetry)
+        XCTAssertEqual(try afterRetryContext.fetch(FetchDescriptor<MetricValue>()).count, 3)
+        XCTAssertEqual(try afterRetryContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).count, 1)
+        XCTAssertEqual(try afterRetryContext.fetch(FetchDescriptor<MetricDefinitionRevision>()).count, 1)
+    }
+
+    @MainActor func testV2DeleteSetRemovesOnlyItsLinkAndPreservesOtherWorkoutsAndRevision() throws {
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let revision = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        func makeWorkout(_ sets: [SetRecord]) -> Workout {
+            Workout(day: .now, records: [ExerciseRecord(exercise: exercise, sortOrder: 0, sets: sets)])
+        }
+        let targetValue = MetricValue(metric: metric, scaledValue: 10)
+        let retainedValue = MetricValue(metric: metric, scaledValue: 20)
+        let otherWorkoutValue = MetricValue(metric: metric, scaledValue: 30)
+        let setA = SetRecord(sortOrder: 1, values: [targetValue])
+        let setB = SetRecord(sortOrder: 2, values: [retainedValue])
+        let workoutA = makeWorkout([setA, setB])
+        let workoutB = makeWorkout([SetRecord(sortOrder: 1, values: [otherWorkoutValue])])
+        context.insert(exercise); context.insert(workoutA); context.insert(workoutB); context.insert(revision)
+        for value in [targetValue, retainedValue, otherWorkoutValue] { _ = try MetricValueRevisionLinking.register(value: value, revision: revision, in: context) }
+        try context.save()
+
+        try WorkoutDeletionV2.deleteSet(WorkoutSetDeletionTarget(workout: workoutA, record: workoutA.records[0], set: setA), in: context)
+        XCTAssertEqual(workoutA.records.first?.sets.map(\.id), [setB.id])
+        XCTAssertEqual(Set(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.valueID)), [retainedValue.id, otherWorkoutValue.id])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [revision.id])
+    }
+
+    @MainActor func testV2DeleteRecordLastChildCascadesAndFailedSaveRestoresGraphAndLinks() throws {
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let revision = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let value = MetricValue(metric: metric, scaledValue: 10)
+        let set = SetRecord(sortOrder: 1, values: [value])
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [set])
+        let workout = Workout(day: .now, records: [record])
+        context.insert(exercise); context.insert(workout); context.insert(revision)
+        _ = try MetricValueRevisionLinking.register(value: value, revision: revision, in: context)
+        try context.save()
+        let target = WorkoutRecordDeletionTarget(workout: workout, record: record)
+        XCTAssertThrowsError(try WorkoutDeletionV2.deleteRecord(target, in: context) { _ in throw InjectedMigrationFailure.expected })
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).map(\.id), [workout.id])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<ExerciseRecord>()).map(\.id), [record.id])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<SetRecord>()).map(\.id), [set.id])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricValue>()).map(\.id), [value.id])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.valueID), [value.id])
+
+        try WorkoutDeletionV2.deleteRecord(target, in: context)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<ExerciseRecord>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<SetRecord>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValue>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [revision.id])
+    }
+
+    @MainActor func testV2DeletionRejectsDirtyContextWithoutDeleting() throws {
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let value = MetricValue(metric: metric, scaledValue: 10)
+        let set = SetRecord(sortOrder: 1, values: [value])
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [set])
+        let workout = Workout(day: .now, records: [record])
+        context.insert(exercise); context.insert(workout); try context.save()
+        let target = WorkoutSetDeletionTarget(workout: workout, record: record, set: set)
+        metric.name = "未保存変更"
+        XCTAssertThrowsError(try WorkoutDeletionV2.deleteSet(target, in: context))
+        XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).contains { $0.id == workout.id })
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValue>()).contains { $0.id == value.id })
+    }
+
+    @MainActor func testV2NewWorkoutSaveCreatesAndReopensRevisionLinksAtomically() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteV2NewWorkout-\(UUID().uuidString).sqlite")
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let configuration = ModelConfiguration("MeleteV2NewWorkout", schema: schema, url: url, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+        let metricA = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let metricB = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 1)
+        let metricC = MetricDefinition(name: "距離", unit: "m", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exerciseA = Exercise(name: "合成種目A", metrics: [metricA, metricB])
+        let exerciseB = Exercise(name: "合成種目B", metrics: [metricC])
+        context.insert(exerciseA)
+        context.insert(exerciseB)
+        let existingRevision = MetricDefinitionRevision(metricID: metricA.id, revision: 4, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 3)
+        context.insert(existingRevision)
+        try context.save()
+
+        var entryA = WorkoutEntryDraft(exercise: exerciseA)
+        entryA.sets[0].values[metricA.id] = "0"
+        entryA.sets[0].values[metricB.id] = ""
+        var secondSet = WorkoutSetDraft()
+        secondSet.values[metricA.id] = "2.5"
+        entryA.sets.append(secondSet)
+        var entryB = WorkoutEntryDraft(exercise: exerciseB)
+        entryB.sets[0].values[metricC.id] = "3"
+        guard case let .success(entries) = WorkoutSetDraftEditing.validatedEntries([entryA, entryB]) else {
+            return XCTFail("合成入力の検証に成功する")
+        }
+        let workout = try WorkoutCreationV2.save(day: .now, entries: entries, in: context)
+        let savedIDs = workout.records.flatMap(\.sets).flatMap(\.values).map(\.id)
+        let savedLinks = try context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(Set(savedLinks.map(\.valueID)), Set(savedIDs))
+        let revisions = try context.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        XCTAssertEqual(revisions.first { $0.metricID == metricA.id }?.revision, 4)
+        XCTAssertEqual(revisions.first { $0.metricID == metricA.id }?.name, "重量")
+        XCTAssertEqual(revisions.first { $0.metricID == metricB.id }?.revision, 1)
+        XCTAssertEqual(revisions.first { $0.metricID == metricC.id }?.revision, 1)
+        XCTAssertEqual(workout.records.count, 2)
+        XCTAssertEqual(workout.records.flatMap(\.sets).count, 3)
+        let zero = try XCTUnwrap(workout.records.flatMap(\.sets).flatMap(\.values).first { $0.metricID == metricA.id && $0.scaledValue == 0 })
+        XCTAssertTrue(savedLinks.contains { $0.valueID == zero.id && $0.revisionID == existingRevision.id })
+        XCTAssertEqual(zero.name, existingRevision.name)
+        XCTAssertEqual(zero.unit, existingRevision.unit)
+        XCTAssertTrue(zero.allowsDecimal)
+        XCTAssertFalse(zero.isRequired)
+        XCTAssertTrue(workout.records.flatMap(\.sets).flatMap(\.values).contains { $0.metricID == metricB.id && $0.scaledValue == nil })
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let reopenedWorkout = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workout.id })
+        XCTAssertEqual(reopenedWorkout.records.count, 2)
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).count, 5)
+    }
+
+    @MainActor func testV2NewWorkoutSaveFailureRemovesOnlyItsInsertsAndDirtyContextIsRejected() throws {
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        context.insert(exercise)
+        try context.save()
+        var entry = WorkoutEntryDraft(exercise: exercise)
+        entry.sets[0].values[metric.id] = "1"
+        guard case let .success(entries) = WorkoutSetDraftEditing.validatedEntries([entry]) else { return XCTFail("入力を検証できる") }
+        XCTAssertThrowsError(try WorkoutCreationV2.save(day: .now, entries: entries, in: context) { _ in throw InjectedMigrationFailure.expected })
+        XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValue>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+
+        let unrelated = MetricDefinition(name: "未保存", unit: "x", allowsDecimal: false, isRequired: false, sortOrder: 1)
+        exercise.metrics.append(unrelated)
+        XCTAssertThrowsError(try WorkoutCreationV2.save(day: .now, entries: entries, in: context))
+        XCTAssertTrue(context.hasChanges)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).isEmpty)
+    }
+
+    func testFailedMigrationLeavesSyntheticV1StoreReadable() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteFailedMigration-\(UUID().uuidString).sqlite")
+        let v1Schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let v1Configuration = ModelConfiguration("MeleteFailedMigrationV1", schema: v1Schema, url: storeURL, cloudKitDatabase: .none)
+
+        let exerciseID = UUID()
+        let metricIDs = [UUID(), UUID()]
+        let workoutID = UUID()
+        let recordID = UUID()
+        let setIDs = [UUID(), UUID()]
+        let valueIDs = [UUID(), UUID(), UUID()]
+        let exerciseDate = Date(timeIntervalSince1970: 1_700_000_010.125)
+        let workoutDate = Date(timeIntervalSince1970: 1_700_000_020.25)
+        let setDate = Date(timeIntervalSince1970: 1_700_000_030.5)
+        let workoutDay = "2023-11-14"
+
+        // 実V1 schemaへ合成データを保存し、移行失敗後もfixtureを残す。
+        do {
+            let container = try ModelContainer(for: v1Schema, configurations: [v1Configuration])
+            let context = ModelContext(container)
+            let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 2)
+            metric.id = metricIDs[0]
+            let optionalMetric = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 0)
+            optionalMetric.id = metricIDs[1]
+            let exercise = Exercise(name: "合成種目", metrics: [metric, optionalMetric])
+            exercise.id = exerciseID
+            exercise.createdAt = exerciseDate
+            exercise.isArchived = true
+
+            let snapshot = MetricValue(metric: metric, scaledValue: 82_500)
+            snapshot.id = valueIDs[0]
+            snapshot.name = "記録時の重量"
+            snapshot.unit = "kg"
+            snapshot.allowsDecimal = true
+            snapshot.isRequired = false
+            let nilValue = MetricValue(metric: optionalMetric, scaledValue: nil)
+            nilValue.id = valueIDs[1]
+            let firstSet = SetRecord(sortOrder: 3, values: [snapshot, nilValue])
+            firstSet.id = setIDs[0]
+            firstSet.createdAt = setDate
+            let zeroValue = MetricValue(metric: metric, scaledValue: 0)
+            zeroValue.id = valueIDs[2]
+            let zeroSet = SetRecord(sortOrder: 7, values: [zeroValue])
+            zeroSet.id = setIDs[1]
+            let record = ExerciseRecord(exercise: exercise, sortOrder: 4, sets: [firstSet, zeroSet])
+            record.id = recordID
+            var utc = Calendar(identifier: .gregorian)
+            utc.timeZone = TimeZone(secondsFromGMT: 0)!
+            let workout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [record], calendar: utc)
+            workout.id = workoutID
+            workout.createdAt = workoutDate
+            context.insert(exercise)
+            context.insert(workout)
+            try context.save()
+        }
+
+        let v2Schema = Schema(versionedSchema: MeleteRevisionSpikeSchemaV2.self)
+        let v2Configuration = ModelConfiguration("MeleteFailedMigrationV2", schema: v2Schema, url: storeURL, cloudKitDatabase: .none)
+        XCTAssertThrowsError(try ModelContainer(
+            for: v2Schema,
+            migrationPlan: MeleteFailingMigrationPlan.self,
+            configurations: [v2Configuration]
+        ))
+
+        // 失敗後はV2で再試行せず、同じURLを実V1 schemaでのみ再openする。
+        let reopened = try ModelContainer(for: v1Schema, configurations: [v1Configuration])
+        let context = ModelContext(reopened)
+        let exercises = try context.fetch(FetchDescriptor<Exercise>())
+        XCTAssertEqual(exercises.count, 1)
+        let savedExercise = try XCTUnwrap(exercises.first)
+        XCTAssertEqual(savedExercise.id, exerciseID)
+        XCTAssertEqual(savedExercise.name, "合成種目")
+        XCTAssertTrue(savedExercise.isArchived)
+        XCTAssertEqual(savedExercise.createdAt, exerciseDate)
+        let definitions = Dictionary(uniqueKeysWithValues: savedExercise.metrics.map { ($0.id, $0) })
+        XCTAssertEqual(Set(definitions.keys), Set(metricIDs))
+        XCTAssertEqual(definitions[metricIDs[0]]?.name, "重量")
+        XCTAssertEqual(definitions[metricIDs[0]]?.unit, "kg")
+        XCTAssertEqual(definitions[metricIDs[0]]?.allowsDecimal, true)
+        XCTAssertEqual(definitions[metricIDs[0]]?.isRequired, true)
+        XCTAssertEqual(definitions[metricIDs[0]]?.sortOrder, 2)
+        XCTAssertEqual(definitions[metricIDs[1]]?.name, "回数")
+        XCTAssertEqual(definitions[metricIDs[1]]?.unit, "回")
+        XCTAssertEqual(definitions[metricIDs[1]]?.allowsDecimal, false)
+        XCTAssertEqual(definitions[metricIDs[1]]?.isRequired, false)
+        XCTAssertEqual(definitions[metricIDs[1]]?.sortOrder, 0)
+
+        let workouts = try context.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(workouts.count, 1)
+        let savedWorkout = try XCTUnwrap(workouts.first)
+        XCTAssertEqual(savedWorkout.id, workoutID)
+        XCTAssertEqual(savedWorkout.day, workoutDay)
+        XCTAssertEqual(savedWorkout.createdAt, workoutDate)
+        XCTAssertEqual(savedWorkout.records.count, 1)
+        let savedRecord = try XCTUnwrap(savedWorkout.records.first)
+        XCTAssertEqual(savedRecord.id, recordID)
+        XCTAssertEqual(savedRecord.exerciseID, exerciseID)
+        XCTAssertEqual(savedRecord.exerciseName, "合成種目")
+        XCTAssertEqual(savedRecord.sortOrder, 4)
+        XCTAssertEqual(savedRecord.workout?.id, workoutID)
+        XCTAssertEqual(savedRecord.sets.count, 2)
+        let sets = Dictionary(uniqueKeysWithValues: savedRecord.sets.map { ($0.id, $0) })
+        XCTAssertEqual(Set(sets.keys), Set(setIDs))
+        let savedSet = try XCTUnwrap(sets[setIDs[0]])
+        XCTAssertEqual(savedSet.sortOrder, 3)
+        XCTAssertEqual(savedSet.createdAt, setDate)
+        XCTAssertEqual(savedSet.exerciseRecord?.id, recordID)
+        XCTAssertEqual(Set(savedSet.values.map(\.id)), Set(valueIDs.prefix(2)))
+        let values = Dictionary(uniqueKeysWithValues: savedSet.values.map { ($0.id, $0) })
+        let savedValue = try XCTUnwrap(values[valueIDs[0]])
+        XCTAssertEqual(savedValue.metricID, metricIDs[0])
+        XCTAssertEqual(savedValue.name, "記録時の重量")
+        XCTAssertEqual(savedValue.unit, "kg")
+        XCTAssertTrue(savedValue.allowsDecimal)
+        XCTAssertFalse(savedValue.isRequired)
+        XCTAssertEqual(savedValue.scaledValue, 82_500)
+        XCTAssertEqual(savedValue.setRecord?.id, setIDs[0])
+        let savedNilValue = try XCTUnwrap(values[valueIDs[1]])
+        XCTAssertEqual(savedNilValue.metricID, metricIDs[1])
+        XCTAssertNil(savedNilValue.scaledValue)
+        XCTAssertEqual(savedNilValue.name, "回数")
+        let savedZeroSet = try XCTUnwrap(sets[setIDs[1]])
+        XCTAssertEqual(savedZeroSet.sortOrder, 7)
+        XCTAssertEqual(savedZeroSet.values.count, 1)
+        XCTAssertEqual(savedZeroSet.values.first?.id, valueIDs[2])
+        XCTAssertEqual(savedZeroSet.values.first?.metricID, metricIDs[0])
+        XCTAssertEqual(savedZeroSet.values.first?.scaledValue, 0)
+        XCTAssertEqual(workoutDay, "2023-11-14")
+    }
+
+    func testRevisionSpikeMigratesActualV1StoreAndPreservesLegacyAsUnrevised() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteRevisionSpike-\(UUID().uuidString).sqlite")
+        let v1Schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let v1Configuration = ModelConfiguration("MeleteRevisionSpikeV1", schema: v1Schema, url: storeURL, cloudKitDatabase: .none)
+
+        let exerciseID = UUID()
+        let metricIDs = [UUID(), UUID()]
+        let workoutIDs = [UUID(), UUID()]
+        let recordIDs = [UUID(), UUID()]
+        let setIDs = [UUID(), UUID()]
+        let valueIDs = [UUID(), UUID(), UUID()]
+        let exerciseCreatedAt = Date(timeIntervalSince1970: 1_700_000_010.125)
+        let workoutCreatedAt = Date(timeIntervalSince1970: 1_700_000_020.25)
+        let setCreatedAt = Date(timeIntervalSince1970: 1_700_000_030.5)
+
+        // この出発点は本番Models.swiftのMeleteSchemaV1.selfそのもの。
+        do {
+            let v1Container = try ModelContainer(for: v1Schema, configurations: [v1Configuration])
+            let context = ModelContext(v1Container)
+            let metricA = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 3)
+            metricA.id = metricIDs[0]
+            let metricB = MetricDefinition(name: "旧回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 1)
+            metricB.id = metricIDs[1]
+            let exercise = Exercise(name: "合成種目", metrics: [metricA, metricB])
+            exercise.id = exerciseID
+            exercise.createdAt = exerciseCreatedAt
+            exercise.isArchived = true
+
+            let firstValue = MetricValue(metric: metricA, scaledValue: 82_500)
+            firstValue.id = valueIDs[0]
+            firstValue.name = "当時の重量"
+            firstValue.unit = "kg"
+            firstValue.allowsDecimal = true
+            firstValue.isRequired = false
+            let nilValue = MetricValue(metric: metricB, scaledValue: nil)
+            nilValue.id = valueIDs[1]
+            let firstSet = SetRecord(sortOrder: 4, values: [firstValue, nilValue])
+            firstSet.id = setIDs[0]
+            firstSet.createdAt = setCreatedAt
+            let firstRecord = ExerciseRecord(exercise: exercise, sortOrder: 2, sets: [firstSet])
+            firstRecord.id = recordIDs[0]
+
+            let zeroValue = MetricValue(metric: metricA, scaledValue: 0)
+            zeroValue.id = valueIDs[2]
+            let secondSet = SetRecord(sortOrder: 1, values: [zeroValue])
+            secondSet.id = setIDs[1]
+            let secondRecord = ExerciseRecord(exercise: exercise, sortOrder: 5, sets: [secondSet])
+            secondRecord.id = recordIDs[1]
+            var utcCalendar = Calendar(identifier: .gregorian)
+            utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+            let workoutA = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [firstRecord, secondRecord], calendar: utcCalendar)
+            workoutA.id = workoutIDs[0]
+            workoutA.createdAt = workoutCreatedAt
+            let workoutB = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [], calendar: utcCalendar)
+            workoutB.id = workoutIDs[1]
+
+            context.insert(exercise)
+            context.insert(workoutA)
+            context.insert(workoutB)
+            try context.save()
+        }
+
+        let v2Schema = Schema(versionedSchema: MeleteRevisionSpikeSchemaV2.self)
+        let v2Configuration = ModelConfiguration("MeleteRevisionSpikeV2", schema: v2Schema, url: storeURL, cloudKitDatabase: .none)
+        let migrated = try ModelContainer(
+            for: v2Schema,
+            migrationPlan: MeleteRevisionSpikeMigrationPlan.self,
+            configurations: [v2Configuration]
+        )
+        let migratedContext = ModelContext(migrated)
+
+        // revision表に旧定義の行を作らないため、既存値のrevisionは推測せずnil相当。
+        XCTAssertEqual(try migratedContext.fetch(FetchDescriptor<MetricDefinitionRevisionCandidate>()).count, 0)
+        let exercises = try migratedContext.fetch(FetchDescriptor<Exercise>())
+        XCTAssertEqual(exercises.count, 1)
+        let migratedExercise = try XCTUnwrap(exercises.first)
+        XCTAssertEqual(migratedExercise.id, exerciseID)
+        XCTAssertEqual(migratedExercise.name, "合成種目")
+        XCTAssertTrue(migratedExercise.isArchived)
+        XCTAssertEqual(migratedExercise.createdAt, exerciseCreatedAt)
+        let definitions = Dictionary(uniqueKeysWithValues: migratedExercise.metrics.map { ($0.id, $0) })
+        XCTAssertEqual(definitions.count, 2)
+        XCTAssertEqual(definitions[metricIDs[0]]?.name, "重量")
+        XCTAssertEqual(definitions[metricIDs[0]]?.unit, "kg")
+        XCTAssertEqual(definitions[metricIDs[0]]?.sortOrder, 3)
+        XCTAssertEqual(definitions[metricIDs[0]]?.allowsDecimal, true)
+        XCTAssertEqual(definitions[metricIDs[0]]?.isRequired, true)
+        XCTAssertEqual(definitions[metricIDs[0]]?.isActive, true)
+        XCTAssertEqual(definitions[metricIDs[1]]?.name, "旧回数")
+        XCTAssertEqual(definitions[metricIDs[1]]?.unit, "回")
+        XCTAssertEqual(definitions[metricIDs[1]]?.sortOrder, 1)
+        XCTAssertEqual(definitions[metricIDs[1]]?.allowsDecimal, false)
+        XCTAssertEqual(definitions[metricIDs[1]]?.isRequired, false)
+        XCTAssertEqual(definitions[metricIDs[1]]?.isActive, true)
+
+        let workouts = try migratedContext.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(workouts.map(\.id)), Set(workoutIDs))
+        let migratedWorkout = try XCTUnwrap(workouts.first { $0.id == workoutIDs[0] })
+        XCTAssertEqual(migratedWorkout.day, "2023-11-14")
+        XCTAssertEqual(migratedWorkout.createdAt, workoutCreatedAt)
+        XCTAssertEqual(migratedWorkout.records.count, 2)
+        let emptyWorkout = try XCTUnwrap(workouts.first { $0.id == workoutIDs[1] })
+        XCTAssertEqual(emptyWorkout.day, "2023-11-03")
+        XCTAssertTrue(emptyWorkout.records.isEmpty)
+        let records = Dictionary(uniqueKeysWithValues: migratedWorkout.records.map { ($0.id, $0) })
+        XCTAssertEqual(records[recordIDs[0]]?.exerciseID, exerciseID)
+        XCTAssertEqual(records[recordIDs[0]]?.exerciseName, "合成種目")
+        XCTAssertEqual(records[recordIDs[0]]?.sortOrder, 2)
+        XCTAssertEqual(records[recordIDs[0]]?.workout?.id, workoutIDs[0])
+        XCTAssertEqual(records[recordIDs[1]]?.sortOrder, 5)
+        XCTAssertEqual(records[recordIDs[1]]?.workout?.id, workoutIDs[0])
+        let migratedSet = try XCTUnwrap(records[recordIDs[0]]?.sets.first)
+        XCTAssertEqual(migratedSet.id, setIDs[0])
+        XCTAssertEqual(migratedSet.sortOrder, 4)
+        XCTAssertEqual(migratedSet.createdAt, setCreatedAt)
+        XCTAssertEqual(migratedSet.exerciseRecord?.id, recordIDs[0])
+        XCTAssertEqual(Set(migratedSet.values.map(\.id)), Set(valueIDs.prefix(2)))
+        let migratedValues = Dictionary(uniqueKeysWithValues: migratedSet.values.map { ($0.id, $0) })
+        XCTAssertEqual(migratedValues[valueIDs[0]]?.metricID, metricIDs[0])
+        XCTAssertEqual(migratedValues[valueIDs[0]]?.name, "当時の重量")
+        XCTAssertEqual(migratedValues[valueIDs[0]]?.unit, "kg")
+        XCTAssertEqual(migratedValues[valueIDs[0]]?.allowsDecimal, true)
+        XCTAssertEqual(migratedValues[valueIDs[0]]?.isRequired, false)
+        XCTAssertEqual(migratedValues[valueIDs[0]]?.scaledValue, 82_500)
+        XCTAssertEqual(migratedValues[valueIDs[0]]?.setRecord?.id, setIDs[0])
+        XCTAssertNil(migratedValues[valueIDs[1]]?.scaledValue)
+        XCTAssertEqual(migratedValues[valueIDs[1]]?.name, "旧回数")
+        let zeroSet = try XCTUnwrap(records[recordIDs[1]]?.sets.first)
+        XCTAssertEqual(zeroSet.id, setIDs[1])
+        XCTAssertEqual(zeroSet.values.first?.id, valueIDs[2])
+        XCTAssertEqual(zeroSet.values.first?.scaledValue, 0)
+
+        // 新しいcontainerで再openし、移行後の永続値を再照合する。
+        let reopened = try ModelContainer(
+            for: v2Schema,
+            migrationPlan: MeleteRevisionSpikeMigrationPlan.self,
+            configurations: [v2Configuration]
+        )
+        let reopenedContext = ModelContext(reopened)
+        XCTAssertEqual(Set(try reopenedContext.fetch(FetchDescriptor<Workout>()).map(\.id)), Set(workoutIDs))
+        let reopenedWorkout = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workoutIDs[0] })
+        XCTAssertEqual(reopenedWorkout.records.count, 2)
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<MetricDefinitionRevisionCandidate>()).count, 0)
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<Exercise>()).first?.metrics.count, 2)
+    }
+
+    func testProductionCandidateV2MigratesAndReopensSyntheticV1StoreWithoutInventingRevisionLinks() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteProductionV2Candidate-\(UUID().uuidString).sqlite")
+        let v1Schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let v1Configuration = ModelConfiguration("MeleteProductionV2CandidateV1", schema: v1Schema, url: storeURL, cloudKitDatabase: .none)
+        let exerciseID = UUID()
+        let metricID = UUID()
+        let workoutID = UUID()
+        let recordID = UUID()
+        let setID = UUID()
+        let valueIDs = [UUID(), UUID()]
+        let exerciseDate = Date(timeIntervalSince1970: 1_700_000_010.125)
+        let workoutDate = Date(timeIntervalSince1970: 1_700_000_020.25)
+        let setDate = Date(timeIntervalSince1970: 1_700_000_030.5)
+
+        do {
+            let container = try ModelContainer(for: v1Schema, configurations: [v1Configuration])
+            let context = ModelContext(container)
+            let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 4)
+            metric.id = metricID
+            let exercise = Exercise(name: "合成種目", metrics: [metric])
+            exercise.id = exerciseID
+            exercise.createdAt = exerciseDate
+            exercise.isArchived = true
+            let snapshot = MetricValue(metric: metric, scaledValue: 12_500)
+            snapshot.id = valueIDs[0]
+            snapshot.name = "記録時の重量"
+            snapshot.unit = "lb"
+            snapshot.allowsDecimal = false
+            snapshot.isRequired = false
+            let nilValue = MetricValue(metric: metric, scaledValue: nil)
+            nilValue.id = valueIDs[1]
+            let set = SetRecord(sortOrder: 8, values: [snapshot, nilValue])
+            set.id = setID
+            set.createdAt = setDate
+            let record = ExerciseRecord(exercise: exercise, sortOrder: 6, sets: [set])
+            record.id = recordID
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+            let workout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [record], calendar: calendar)
+            workout.id = workoutID
+            workout.createdAt = workoutDate
+            context.insert(exercise)
+            context.insert(workout)
+            try context.save()
+        }
+
+        let v2Schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let v2Configuration = ModelConfiguration("MeleteProductionV2CandidateV2", schema: v2Schema, url: storeURL, cloudKitDatabase: .none)
+        let migrated = try ModelContainer(for: v2Schema, migrationPlan: MeleteMigrationPlan.self, configurations: [v2Configuration])
+        let context = ModelContext(migrated)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+
+        let exercise = try XCTUnwrap(try context.fetch(FetchDescriptor<Exercise>()).first)
+        XCTAssertEqual(exercise.id, exerciseID)
+        XCTAssertEqual(exercise.createdAt, exerciseDate)
+        XCTAssertTrue(exercise.isArchived)
+        XCTAssertEqual(exercise.metrics.first?.id, metricID)
+        XCTAssertEqual(exercise.metrics.first?.sortOrder, 4)
+        let workout = try XCTUnwrap(try context.fetch(FetchDescriptor<Workout>()).first)
+        XCTAssertEqual(workout.id, workoutID)
+        XCTAssertEqual(workout.day, "2023-11-14")
+        XCTAssertEqual(workout.createdAt, workoutDate)
+        let record = try XCTUnwrap(workout.records.first)
+        XCTAssertEqual(record.id, recordID)
+        XCTAssertEqual(record.exerciseID, exerciseID)
+        XCTAssertEqual(record.exerciseName, "合成種目")
+        XCTAssertEqual(record.sortOrder, 6)
+        XCTAssertEqual(record.workout?.id, workoutID)
+        let set = try XCTUnwrap(record.sets.first)
+        XCTAssertEqual(set.id, setID)
+        XCTAssertEqual(set.sortOrder, 8)
+        XCTAssertEqual(set.createdAt, setDate)
+        XCTAssertEqual(set.exerciseRecord?.id, recordID)
+        let values = Dictionary(uniqueKeysWithValues: set.values.map { ($0.id, $0) })
+        XCTAssertEqual(Set(values.keys), Set(valueIDs))
+        XCTAssertEqual(values[valueIDs[0]]?.metricID, metricID)
+        XCTAssertEqual(values[valueIDs[0]]?.name, "記録時の重量")
+        XCTAssertEqual(values[valueIDs[0]]?.unit, "lb")
+        XCTAssertFalse(values[valueIDs[0]]?.allowsDecimal ?? true)
+        XCTAssertFalse(values[valueIDs[0]]?.isRequired ?? true)
+        XCTAssertEqual(values[valueIDs[0]]?.scaledValue, 12_500)
+        XCTAssertEqual(values[valueIDs[0]]?.setRecord?.id, setID)
+        XCTAssertNil(values[valueIDs[1]]?.scaledValue)
+
+        let reopened = try ModelContainer(for: v2Schema, migrationPlan: MeleteMigrationPlan.self, configurations: [v2Configuration])
+        let reopenedContext = ModelContext(reopened)
+        let reopenedWorkout = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first)
+        XCTAssertEqual(reopenedWorkout.id, workoutID)
+        XCTAssertEqual(reopenedWorkout.records.first?.sets.first?.values.count, 2)
+        XCTAssertTrue(try reopenedContext.fetch(FetchDescriptor<MetricDefinitionRevision>()).isEmpty)
+        XCTAssertTrue(try reopenedContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+        XCTAssertTrue(try reopenedContext.fetch(FetchDescriptor<Exercise>()).first?.isArchived == true)
+    }
+
     func testV1SyntheticFixtureRoundTripsWithoutMigration() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteV1Fixture-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
