@@ -548,6 +548,115 @@ final class MeleteTests: XCTestCase {
         XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).isEmpty)
     }
 
+    @MainActor func testV2NewWorkoutSaveRejectsFutureDayWithoutChangingContext() throws {
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目・日付", metrics: [metric])
+        context.insert(exercise)
+        try context.save()
+
+        var entry = WorkoutEntryDraft(exercise: exercise)
+        entry.sets[0].values[metric.id] = "1"
+        let entries = [entry]
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let fixedNow = Date.now
+        let today = calendar.startOfDay(for: fixedNow)
+        let laterToday = try XCTUnwrap(calendar.date(bySettingHour: 23, minute: 59, second: 0, of: today))
+        let tomorrow = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: today))
+        let yesterday = try XCTUnwrap(calendar.date(byAdding: .day, value: -1, to: today))
+
+        XCTAssertThrowsError(try WorkoutCreationV2.save(day: tomorrow, entries: entries, in: context, calendar: calendar))
+        XCTAssertFalse(context.hasChanges)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+
+        XCTAssertNoThrow(try WorkoutCreationV2.save(day: laterToday, entries: entries, in: context, calendar: calendar))
+        try context.save()
+        XCTAssertNoThrow(try WorkoutCreationV2.save(day: yesterday, entries: entries, in: context, calendar: calendar))
+        try context.save()
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).count, 2)
+    }
+
+    @MainActor func testV2NewWorkoutSaveRejectsEmptyAndDuplicateExerciseEntries() throws {
+        let context = try makeCandidateV2Context()
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目・重複", metrics: [metric])
+        context.insert(exercise)
+        try context.save()
+
+        var entry = WorkoutEntryDraft(exercise: exercise)
+        entry.sets[0].values[metric.id] = "1"
+        let day = Date(timeIntervalSince1970: 1_700_000_000)
+
+        XCTAssertThrowsError(try WorkoutCreationV2.save(day: day, entries: [], in: context)) { error in
+            guard case WorkoutCreationV2Error.invalidEntries = error else {
+                return XCTFail("空入力はinvalidEntriesで拒否される: \(error)")
+            }
+        }
+        XCTAssertFalse(context.hasChanges)
+        XCTAssertThrowsError(try WorkoutCreationV2.save(day: day, entries: [entry, entry], in: context)) { error in
+            guard case WorkoutCreationV2Error.invalidEntries = error else {
+                return XCTFail("重複種目入力はinvalidEntriesで拒否される: \(error)")
+            }
+        }
+        XCTAssertFalse(context.hasChanges)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).isEmpty)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+    }
+
+    @MainActor func testV2NewWorkoutSavePersistFailurePreservesExistingGraphAndAllowsRetry() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteV2NewWorkoutPersistFailure-\(UUID().uuidString).sqlite")
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let configuration = ModelConfiguration("MeleteV2NewWorkoutPersistFailure", schema: schema, url: url, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目・失敗復元", metrics: [metric])
+        let existingValue = MetricValue(metric: metric, scaledValue: 2_000)
+        let existingSet = SetRecord(sortOrder: 1, values: [existingValue])
+        let existingRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [existingSet])
+        let existingWorkout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [existingRecord])
+        let existingRevision = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: metric.sortOrder)
+        context.insert(exercise); context.insert(existingValue); context.insert(existingRevision)
+        let existingLink = try MetricValueRevisionLinking.register(value: existingValue, revision: existingRevision, in: context)
+        context.insert(existingWorkout)
+        try context.save()
+
+        var entry = WorkoutEntryDraft(exercise: exercise)
+        entry.sets[0].values[metric.id] = "3"
+        guard case let .success(entries) = WorkoutSetDraftEditing.validatedEntries([entry]) else {
+            return XCTFail("合成入力の検証に成功する")
+        }
+        let newDay = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertThrowsError(try WorkoutCreationV2.save(day: newDay, entries: entries, in: context) { _ in
+            throw InjectedMigrationFailure.expected
+        })
+        XCTAssertFalse(context.hasChanges)
+
+        let workoutsAfterFailure = try context.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(workoutsAfterFailure.map(\.id), [existingWorkout.id])
+        let preservedWorkout = try XCTUnwrap(workoutsAfterFailure.first)
+        XCTAssertEqual(preservedWorkout.records.map(\.id), [existingRecord.id])
+        XCTAssertEqual(preservedWorkout.records[0].sets.map(\.id), [existingSet.id])
+        XCTAssertEqual(preservedWorkout.records[0].sets[0].values.map(\.id), [existingValue.id])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [existingRevision.id])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.id), [existingLink.id])
+
+        // 通常saveを挟んでも失敗した追加グラフは残らず、同じ入力で保存を再試行できる。
+        try context.save()
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).map(\.id), [existingWorkout.id])
+        let retriedWorkout = try WorkoutCreationV2.save(day: newDay, entries: entries, in: context)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).count, 2)
+        XCTAssertEqual(retriedWorkout.records.count, 1)
+        XCTAssertEqual(retriedWorkout.records[0].sets.count, 1)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [existingRevision.id])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).count, 2)
+    }
+
     func testFailedMigrationLeavesSyntheticV1StoreReadable() throws {
         let storeURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("MeleteFailedMigration-\(UUID().uuidString).sqlite")
@@ -920,6 +1029,124 @@ final class MeleteTests: XCTestCase {
         XCTAssertTrue(try reopenedContext.fetch(FetchDescriptor<MetricDefinitionRevision>()).isEmpty)
         XCTAssertTrue(try reopenedContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
         XCTAssertTrue(try reopenedContext.fetch(FetchDescriptor<Exercise>()).first?.isArchived == true)
+    }
+
+    func testCandidateV2PersistsExplicitMetricRevisionSeriesIDsAcrossReopen() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteCandidateV2SeriesID-\(UUID().uuidString).sqlite")
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let configuration = ModelConfiguration("MeleteCandidateV2SeriesID", schema: schema, url: storeURL, cloudKitDatabase: .none)
+        let metricID = UUID()
+        let inputConditionSeriesID = UUID()
+        let renamedUnitSeriesID = UUID()
+        let revisionIDs = [UUID(), UUID(), UUID()]
+
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            let revisions = [
+                MetricDefinitionRevision(id: revisionIDs[0], metricID: metricID, seriesID: inputConditionSeriesID, revision: 1, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 2),
+                // 入力条件だけの変更は、同じmetricの次revisionでも同じseriesに属する。
+                MetricDefinitionRevision(id: revisionIDs[1], metricID: metricID, seriesID: inputConditionSeriesID, revision: 2, name: "重量", unit: "kg", allowsDecimal: false, isRequired: true, sortOrder: 2),
+                // 名前・単位の変更は別seriesとして明示し、IDを推測しない。
+                MetricDefinitionRevision(id: revisionIDs[2], metricID: metricID, seriesID: renamedUnitSeriesID, revision: 3, name: "負荷", unit: "lb", allowsDecimal: false, isRequired: true, sortOrder: 2)
+            ]
+            revisions.forEach(context.insert)
+            try context.save()
+        }
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let revisions = try reopenedContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
+            .sorted { $0.revision < $1.revision }
+
+        XCTAssertEqual(revisions.map(\.id), revisionIDs)
+        XCTAssertEqual(revisions.map(\.metricID), [metricID, metricID, metricID])
+        XCTAssertEqual(revisions.map(\.seriesID), [inputConditionSeriesID, inputConditionSeriesID, renamedUnitSeriesID])
+        XCTAssertEqual(revisions.map(\.name), ["重量", "重量", "負荷"])
+        XCTAssertEqual(revisions.map(\.unit), ["kg", "kg", "lb"])
+        XCTAssertEqual(revisions.map(\.allowsDecimal), [true, false, false])
+        XCTAssertEqual(revisions.map(\.isRequired), [false, true, true])
+        XCTAssertEqual(revisions.map(\.sortOrder), [2, 2, 2])
+    }
+
+    @MainActor func testMetricDefinitionEditingV2RevisesSeriesAndPreservesLegacyValueAcrossReopen() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteMetricEditingV2-\(UUID().uuidString).sqlite")
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let configuration = ModelConfiguration("MeleteMetricEditingV2", schema: schema, url: storeURL, cloudKitDatabase: .none)
+        let metricID = UUID()
+        let legacyValueID = UUID()
+        let originalSeriesID = UUID()
+        let exerciseID = UUID()
+        let legacyWorkoutID = UUID()
+        var generatedValueIDs: [UUID] = []
+
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+            metric.id = metricID
+            let exercise = Exercise(name: "合成種目", metrics: [metric])
+            exercise.id = exerciseID
+            let legacyValue = MetricValue(metric: metric, scaledValue: 12_500)
+            legacyValue.id = legacyValueID
+            let workout = Workout(day: .now, records: [ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [legacyValue])])])
+            workout.id = legacyWorkoutID
+            context.insert(exercise)
+            context.insert(workout)
+            context.insert(MetricDefinitionRevision(metricID: metricID, seriesID: originalSeriesID, revision: 1, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0))
+            try context.save()
+
+            func saveEdit(unit: String, allowsDecimal: Bool, isRequired: Bool) throws {
+                let currentExercise = try XCTUnwrap(context.fetch(FetchDescriptor<Exercise>()).first { $0.id == exerciseID })
+                var drafts = MetricDefinitionEditing.draft(for: currentExercise)
+                drafts[0].unit = unit
+                drafts[0].allowsDecimal = allowsDecimal
+                drafts[0].isRequired = isRequired
+                try MetricDefinitionEditingV2.save(drafts, for: currentExercise, in: context)
+
+                var entry = WorkoutEntryDraft(exercise: currentExercise)
+                entry.sets[0].values[metricID] = allowsDecimal ? "8.5" : "8"
+                let generatedWorkout = try WorkoutCreationV2.save(day: .now, entries: [entry], in: context)
+                generatedValueIDs.append(try XCTUnwrap(generatedWorkout.records.first?.sets.first?.values.first?.id))
+            }
+
+            try saveEdit(unit: "lb", allowsDecimal: true, isRequired: false)
+            try saveEdit(unit: "lb", allowsDecimal: false, isRequired: true)
+            try saveEdit(unit: "kg", allowsDecimal: false, isRequired: true)
+        }
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let revisions = try reopenedContext.fetch(FetchDescriptor<MetricDefinitionRevision>()).sorted { $0.revision < $1.revision }
+        XCTAssertEqual(revisions.map(\.metricID), [metricID, metricID, metricID, metricID])
+        XCTAssertEqual(revisions.map(\.revision), [1, 2, 3, 4])
+        XCTAssertEqual(revisions.map(\.unit), ["kg", "lb", "lb", "kg"])
+        XCTAssertEqual(revisions[0].seriesID, originalSeriesID)
+        XCTAssertNotEqual(revisions[1].seriesID, revisions[0].seriesID)
+        XCTAssertEqual(revisions[2].seriesID, revisions[1].seriesID)
+        XCTAssertNotEqual(revisions[3].seriesID, revisions[0].seriesID)
+        XCTAssertNotEqual(revisions[3].seriesID, revisions[1].seriesID)
+
+        let savedWorkout = try XCTUnwrap(reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == legacyWorkoutID })
+        let legacyValue = try XCTUnwrap(savedWorkout.records.first?.sets.first?.values.first { $0.id == legacyValueID })
+        XCTAssertEqual(legacyValue.metricID, metricID)
+        XCTAssertEqual(legacyValue.name, "重量")
+        XCTAssertEqual(legacyValue.unit, "kg")
+        XCTAssertEqual(legacyValue.scaledValue, 12_500)
+        XCTAssertTrue(try reopenedContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).allSatisfy { $0.valueID != legacyValueID }, "revision linkのない旧値を推測で分類しない")
+
+        let linksByValueID = Dictionary(uniqueKeysWithValues: try reopenedContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).map { ($0.valueID, $0.revisionID) })
+        let valuesByID = Dictionary(uniqueKeysWithValues: try reopenedContext.fetch(FetchDescriptor<MetricValue>()).map { ($0.id, $0) })
+        XCTAssertEqual(generatedValueIDs.count, 3)
+        for (index, valueID) in generatedValueIDs.enumerated() {
+            let value = try XCTUnwrap(valuesByID[valueID])
+            let linkedRevisionID = try XCTUnwrap(linksByValueID[valueID])
+            let linkedRevision = try XCTUnwrap(revisions.first { $0.id == linkedRevisionID })
+            XCTAssertEqual(linkedRevision.id, revisions[index + 1].id)
+            XCTAssertTrue(MetricValueRevisionLinking.matchesSnapshot(name: value.name, unit: value.unit, allowsDecimal: value.allowsDecimal, isRequired: value.isRequired, revision: linkedRevision))
+        }
     }
 
     func testV1SyntheticFixtureRoundTripsWithoutMigration() throws {
@@ -2551,5 +2778,60 @@ extension MeleteTests {
         XCTAssertEqual(reopenedValue.name, "旧snapshot名")
         XCTAssertEqual(reopenedValue.unit, "kg")
         XCTAssertNil(reopenedValue.scaledValue)
+    }
+
+    func testMetricRevisionTransitionSeparatesHistoryFromSeriesIdentity() {
+        let originalSeriesID = UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
+        let renamedSeriesID = UUID(uuidString: "20000000-0000-0000-0000-000000000002")!
+        let revisionID = UUID(uuidString: "30000000-0000-0000-0000-000000000003")!
+        let restoredNameSeriesID = UUID(uuidString: "40000000-0000-0000-0000-000000000004")!
+        let original = MetricRevisionSnapshot(name: "重量", unit: "kg", allowsDecimal: true, isRequired: false)
+
+        let renamed = MetricRevisionTransitionDecision.decide(MetricRevisionTransitionInput(
+            current: original,
+            proposed: MetricRevisionSnapshot(name: "重量", unit: "lb", allowsDecimal: true, isRequired: false),
+            currentSeriesID: originalSeriesID,
+            proposedRevisionID: revisionID,
+            proposedSeriesID: renamedSeriesID
+        ))
+        XCTAssertEqual(renamed.kind, .nameOrUnitChanged)
+        XCTAssertEqual(renamed.seriesID, renamedSeriesID, "名称／単位変更は新しい系列を使う")
+        XCTAssertEqual(renamed.revisionID, revisionID, "履歴IDは系列IDと独立して割り当てる")
+        XCTAssertNotEqual(renamed.seriesID, originalSeriesID)
+        XCTAssertNotEqual(renamed.revisionID, renamed.seriesID)
+
+        let conditionsOnly = MetricRevisionTransitionDecision.decide(MetricRevisionTransitionInput(
+            current: original,
+            proposed: MetricRevisionSnapshot(name: "重量", unit: "kg", allowsDecimal: false, isRequired: true),
+            currentSeriesID: originalSeriesID,
+            proposedRevisionID: revisionID,
+            proposedSeriesID: renamedSeriesID
+        ))
+        XCTAssertEqual(conditionsOnly.kind, .inputConditionsChanged)
+        XCTAssertEqual(conditionsOnly.seriesID, originalSeriesID, "入力条件のみの変更では系列を維持する")
+        XCTAssertEqual(conditionsOnly.revisionID, revisionID, "入力条件変更には別revisionが必要")
+
+        let unchanged = MetricRevisionTransitionDecision.decide(MetricRevisionTransitionInput(
+            current: original,
+            proposed: original,
+            currentSeriesID: originalSeriesID,
+            proposedRevisionID: revisionID,
+            proposedSeriesID: renamedSeriesID
+        ))
+        XCTAssertEqual(unchanged.kind, .unchanged)
+        XCTAssertEqual(unchanged.seriesID, originalSeriesID)
+        XCTAssertNil(unchanged.revisionID, "同一内容ならrevision不要")
+
+        let restoredName = MetricRevisionTransitionDecision.decide(MetricRevisionTransitionInput(
+            current: MetricRevisionSnapshot(name: "重量", unit: "lb", allowsDecimal: true, isRequired: false),
+            proposed: original,
+            currentSeriesID: renamedSeriesID,
+            proposedRevisionID: revisionID,
+            proposedSeriesID: restoredNameSeriesID
+        ))
+        XCTAssertEqual(restoredName.kind, .nameOrUnitChanged)
+        XCTAssertEqual(restoredName.seriesID, restoredNameSeriesID, "名前を戻しても別系列を割り当てる")
+        XCTAssertNotEqual(restoredName.seriesID, originalSeriesID)
+        XCTAssertNotEqual(restoredName.seriesID, renamedSeriesID)
     }
 }

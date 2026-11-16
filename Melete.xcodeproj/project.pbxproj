@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		1B2D9B260F7B64EE334FE9FE /* MeleteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */; };
 		47410A4C81C03CC79E482417 /* MeleteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CE6F7CE1B96CFC73101F34A /* MeleteApp.swift */; };
+		5C084228CF861D55A4CD8040 /* MetricDefinitionEditingV2SafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5744EF0E54881543913A57EE /* MetricDefinitionEditingV2SafetyTests.swift */; };
 		5E48FF962284DB294E535545 /* MetricInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45D9505953694C4931C727E0 /* MetricInput.swift */; };
 		611D7BB3B68B0014EE0AEFD2 /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F8B60E5F37F9AC5147FFDEB /* MainView.swift */; };
 		68033C0AF5E93C4C62A53916 /* WorkoutFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50DC90FD8B6B2A3473447A69 /* WorkoutFlowUITests.swift */; };
@@ -43,6 +44,7 @@
 		45D9505953694C4931C727E0 /* MetricInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricInput.swift; sourceTree = "<group>"; };
 		50DC90FD8B6B2A3473447A69 /* WorkoutFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutFlowUITests.swift; sourceTree = "<group>"; };
 		525618D8B5D17960BA8A4BF2 /* Melete.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Melete.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5744EF0E54881543913A57EE /* MetricDefinitionEditingV2SafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDefinitionEditingV2SafetyTests.swift; sourceTree = "<group>"; };
 		7F8B60E5F37F9AC5147FFDEB /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeleteTests.swift; sourceTree = "<group>"; };
 		9CE6F7CE1B96CFC73101F34A /* MeleteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeleteApp.swift; sourceTree = "<group>"; };
@@ -53,6 +55,7 @@
 			isa = PBXGroup;
 			children = (
 				8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */,
+				5744EF0E54881543913A57EE /* MetricDefinitionEditingV2SafetyTests.swift */,
 			);
 			path = MeleteTests;
 			sourceTree = "<group>";
@@ -204,6 +207,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1B2D9B260F7B64EE334FE9FE /* MeleteTests.swift in Sources */,
+				5C084228CF861D55A4CD8040 /* MetricDefinitionEditingV2SafetyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

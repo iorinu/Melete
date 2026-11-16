@@ -76,6 +76,57 @@ struct MetricDefinitionSnapshot: Equatable {
     }
 }
 
+// 永続化候補の改定遷移を表す純粋な入力・出力型。V1モデルには追加情報を持たせない。
+struct MetricRevisionSnapshot: Equatable {
+    let name: String
+    let unit: String
+    let allowsDecimal: Bool
+    let isRequired: Bool
+}
+
+struct MetricRevisionTransitionInput: Equatable {
+    let current: MetricRevisionSnapshot
+    let proposed: MetricRevisionSnapshot
+    let currentSeriesID: UUID
+    let proposedRevisionID: UUID
+    let proposedSeriesID: UUID
+}
+
+enum MetricRevisionTransitionKind: Equatable {
+    case unchanged
+    case inputConditionsChanged
+    case nameOrUnitChanged
+}
+
+struct MetricRevisionTransition: Equatable {
+    let kind: MetricRevisionTransitionKind
+    let revisionID: UUID?
+    let seriesID: UUID
+}
+
+enum MetricRevisionTransitionDecision {
+    static func decide(_ input: MetricRevisionTransitionInput) -> MetricRevisionTransition {
+        if input.current.name != input.proposed.name || input.current.unit != input.proposed.unit {
+            return MetricRevisionTransition(
+                kind: .nameOrUnitChanged,
+                revisionID: input.proposedRevisionID,
+                seriesID: input.proposedSeriesID
+            )
+        }
+
+        if input.current.allowsDecimal != input.proposed.allowsDecimal
+            || input.current.isRequired != input.proposed.isRequired {
+            return MetricRevisionTransition(
+                kind: .inputConditionsChanged,
+                revisionID: input.proposedRevisionID,
+                seriesID: input.currentSeriesID
+            )
+        }
+
+        return MetricRevisionTransition(kind: .unchanged, revisionID: nil, seriesID: input.currentSeriesID)
+    }
+}
+
 enum MetricDefinitionEditing {
     static func draft(for exercise: Exercise) -> [MetricDefinitionDraft] {
         exercise.metrics.sorted { $0.sortOrder == $1.sortOrder ? $0.id.uuidString < $1.id.uuidString : $0.sortOrder < $1.sortOrder }.map(MetricDefinitionDraft.init(existing:))
@@ -152,6 +203,183 @@ enum MetricDefinitionEditingError: LocalizedError {
         case .invalid: "種目名・項目名・単位を入力してください。項目名は重複できません。"
         case .changed: "項目定義が別の画面で変更されました。画面を開き直してから再度お試しください。"
         case .sortOrderOverflow: "項目の表示順の上限に達したため、追加できません。"
+        }
+    }
+}
+
+// V2の既存項目だけを編集する保存境界。UIからはまだ呼び出さない。
+@MainActor enum MetricDefinitionEditingV2 {
+    static func save(_ drafts: [MetricDefinitionDraft], for exercise: Exercise, in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
+        guard !context.hasChanges else { throw MetricDefinitionEditingV2Error.unsavedContext }
+
+        let exercises = try context.fetch(FetchDescriptor<Exercise>())
+        guard let storedExercise = exercises.first(where: { $0.id == exercise.id }),
+              storedExercise.persistentModelID == exercise.persistentModelID else {
+            throw MetricDefinitionEditingV2Error.changed
+        }
+        let metrics = storedExercise.metrics
+        let metricIDs = metrics.map(\.id)
+        guard Set(metricIDs).count == metricIDs.count else { throw MetricDefinitionEditingV2Error.changed }
+        let metricsByID = Dictionary(uniqueKeysWithValues: metrics.map { ($0.id, $0) })
+        let originalMetrics = metrics
+        let originalSnapshots = Dictionary(uniqueKeysWithValues: metrics.map { ($0.id, MetricDefinitionSnapshot($0)) })
+        let existingDrafts = drafts.filter { $0.original != nil }
+        let addedDrafts = drafts.filter { $0.original == nil }
+        guard Set(drafts.map(\.id)).count == drafts.count,
+              Set(existingDrafts.map(\.id)) == Set(metricIDs),
+              existingDrafts.allSatisfy({ draft in
+                  guard let original = draft.original, let metric = metricsByID[draft.id] else { return false }
+                  return MetricDefinitionSnapshot(metric) == original
+                      && original.sortOrder == metric.sortOrder
+              }),
+              addedDrafts.allSatisfy({ metricsByID[$0.id] == nil }) else {
+            throw MetricDefinitionEditingV2Error.changed
+        }
+
+        let cleaned = drafts.map { draft in
+            (draft, draft.name.trimmingCharacters(in: .whitespacesAndNewlines), draft.unit.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        guard !cleaned.isEmpty, cleaned.allSatisfy({ !$0.1.isEmpty && !$0.2.isEmpty }),
+              Set(cleaned.map { $0.1.lowercased() }).count == cleaned.count else {
+            throw MetricDefinitionEditingError.invalid
+        }
+
+        let allDefinitions = try context.fetch(FetchDescriptor<MetricDefinition>())
+        let storedIDs = Set(allDefinitions.map(\.id))
+        guard addedDrafts.allSatisfy({ !storedIDs.contains($0.id) }) else { throw MetricDefinitionEditingV2Error.changed }
+        let maximumOrder = metrics.map(\.sortOrder).max() ?? -1
+        let (_, orderOverflow) = maximumOrder.addingReportingOverflow(addedDrafts.count)
+        guard !orderOverflow, addedDrafts.isEmpty || maximumOrder < Int.max else {
+            throw MetricDefinitionEditingError.sortOrderOverflow
+        }
+
+        let history = try context.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        var changes: [(MetricDefinition, String, String, Bool, Bool, MetricDefinitionRevision)] = []
+        var initialRevisions: [MetricDefinitionRevision] = []
+        var changedRevisionIDs: Set<UUID> = []
+        for (draft, name, unit) in cleaned where draft.original != nil {
+            guard let metric = metricsByID[draft.id] else { throw MetricDefinitionEditingV2Error.changed }
+            let revisions = history.filter { $0.metricID == metric.id }
+            guard Set(revisions.map(\.revision)).count == revisions.count else { throw MetricValueRevisionLinkingError.duplicateRevision }
+            let current: MetricRevisionSnapshot
+            let currentSeriesID: UUID
+            let latestRevision: Int?
+            if let latest = revisions.max(by: { $0.revision < $1.revision }) {
+                guard MetricValueRevisionLinking.matchesSnapshot(metric, revision: latest) else { throw MetricValueRevisionLinkingError.snapshotMismatch }
+                current = MetricRevisionSnapshot(name: latest.name, unit: latest.unit, allowsDecimal: latest.allowsDecimal, isRequired: latest.isRequired)
+                currentSeriesID = latest.seriesID
+                latestRevision = latest.revision
+            } else {
+                current = MetricRevisionSnapshot(name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired)
+                currentSeriesID = UUID()
+                latestRevision = nil
+            }
+            let proposed = MetricRevisionSnapshot(name: name, unit: unit, allowsDecimal: draft.allowsDecimal, isRequired: draft.isRequired)
+            let transition = MetricRevisionTransitionDecision.decide(MetricRevisionTransitionInput(
+                current: current, proposed: proposed, currentSeriesID: currentSeriesID,
+                proposedRevisionID: UUID(), proposedSeriesID: UUID()
+            ))
+            let revision: MetricDefinitionRevision
+            if transition.kind == .unchanged {
+                revision = revisions.max(by: { $0.revision < $1.revision })
+                    ?? MetricDefinitionRevision(
+                        metricID: metric.id, seriesID: currentSeriesID, revision: 1,
+                        name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal,
+                        isRequired: metric.isRequired, sortOrder: metric.sortOrder
+                    )
+            } else {
+                let nextRevision: Int
+                if let latestRevision {
+                    let (next, overflow) = latestRevision.addingReportingOverflow(1)
+                    guard !overflow else { throw MetricDefinitionEditingV2Error.revisionOverflow }
+                    nextRevision = next
+                } else {
+                    nextRevision = 2
+                }
+                if revisions.isEmpty {
+                    initialRevisions.append(MetricDefinitionRevision(
+                        metricID: metric.id, seriesID: currentSeriesID, revision: 1,
+                        name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal,
+                        isRequired: metric.isRequired, sortOrder: metric.sortOrder
+                    ))
+                }
+                guard let revisionID = transition.revisionID else { throw MetricDefinitionEditingV2Error.changed }
+                revision = MetricDefinitionRevision(
+                    id: revisionID, metricID: metric.id, seriesID: transition.seriesID,
+                    revision: nextRevision, name: name, unit: unit, allowsDecimal: draft.allowsDecimal,
+                    isRequired: draft.isRequired, sortOrder: metric.sortOrder
+                )
+                changedRevisionIDs.insert(revision.id)
+            }
+            changes.append((metric, name, unit, draft.allowsDecimal, draft.isRequired, revision))
+        }
+
+        var addedMetrics: [MetricDefinition] = []
+        var nextOrder = maximumOrder
+        for (draft, name, unit) in cleaned where draft.original == nil {
+            let (order, overflow) = nextOrder.addingReportingOverflow(1)
+            guard !overflow else { throw MetricDefinitionEditingError.sortOrderOverflow }
+            let metric = MetricDefinition(name: name, unit: unit, allowsDecimal: draft.allowsDecimal, isRequired: draft.isRequired, sortOrder: order)
+            metric.isActive = draft.isActive
+            addedMetrics.append(metric)
+            nextOrder = order
+        }
+        let resultingIDs = metricIDs + addedMetrics.map(\.id)
+        guard Set(resultingIDs).count == resultingIDs.count,
+              addedMetrics.allSatisfy({ !storedIDs.contains($0.id) }) else {
+            throw MetricDefinitionEditingV2Error.changed
+        }
+
+        var revisionsToInsert = initialRevisions
+        for entry in changes where changedRevisionIDs.contains(entry.5.id)
+            && !history.contains(where: { $0.id == entry.5.id })
+            && !revisionsToInsert.contains(where: { $0.id == entry.5.id }) {
+            revisionsToInsert.append(entry.5)
+        }
+        for (metric, name, unit, allowsDecimal, isRequired, _) in changes {
+            metric.name = name
+            metric.unit = unit
+            metric.allowsDecimal = allowsDecimal
+            metric.isRequired = isRequired
+        }
+        for draft in drafts where draft.original != nil {
+            metricsByID[draft.id]?.isActive = draft.isActive
+        }
+        do {
+            for metric in addedMetrics { context.insert(metric) }
+            storedExercise.metrics.append(contentsOf: addedMetrics)
+            revisionsToInsert.forEach(context.insert)
+            try persist(context)
+        } catch {
+            // 保持中のモデル参照と親子関係を戻してからrollbackし、contextをcleanに戻す。
+            for metric in metrics {
+                guard let snapshot = originalSnapshots[metric.id] else { continue }
+                metric.name = snapshot.name
+                metric.unit = snapshot.unit
+                metric.allowsDecimal = snapshot.allowsDecimal
+                metric.isRequired = snapshot.isRequired
+                metric.isActive = snapshot.isActive
+                metric.sortOrder = snapshot.sortOrder
+            }
+            storedExercise.metrics = originalMetrics
+            context.rollback()
+            throw error
+        }
+    }
+}
+
+enum MetricDefinitionEditingV2Error: LocalizedError {
+    case notImplemented
+    case unsavedContext
+    case changed
+    case revisionOverflow
+
+    var errorDescription: String? {
+        switch self {
+        case .notImplemented: "V2の既存項目定義編集は未実装です。"
+        case .unsavedContext: "未保存の変更があるため、項目定義を編集できません。"
+        case .changed: "項目定義が別の画面で変更されたか、V2未対応の変更が含まれています。画面を開き直してください。"
+        case .revisionOverflow: "項目改定番号の上限に達したため、保存できません。"
         }
     }
 }
@@ -549,6 +777,7 @@ enum MeleteSchemaV1: VersionedSchema {
 @Model final class MetricDefinitionRevision {
     var id: UUID
     var metricID: UUID
+    var seriesID: UUID
     var revision: Int
     var name: String
     var unit: String
@@ -556,9 +785,10 @@ enum MeleteSchemaV1: VersionedSchema {
     var isRequired: Bool
     var sortOrder: Int
 
-    init(id: UUID = UUID(), metricID: UUID, revision: Int, name: String, unit: String, allowsDecimal: Bool, isRequired: Bool, sortOrder: Int) {
+    init(id: UUID = UUID(), metricID: UUID, seriesID: UUID = UUID(), revision: Int, name: String, unit: String, allowsDecimal: Bool, isRequired: Bool, sortOrder: Int) {
         self.id = id
         self.metricID = metricID
+        self.seriesID = seriesID
         self.revision = revision
         self.name = name
         self.unit = unit
@@ -746,6 +976,13 @@ enum MetricValueRevisionLinkingError: LocalizedError {
 @MainActor enum WorkoutCreationV2 {
     static func save(day: Date, entries: [WorkoutEntryDraft], in context: ModelContext, calendar: Calendar = .current, persist: (ModelContext) throws -> Void = { try $0.save() }) throws -> Workout {
         guard !context.hasChanges else { throw WorkoutCreationV2Error.unsavedContext }
+        guard calendar.startOfDay(for: day) <= calendar.startOfDay(for: .now) else {
+            throw WorkoutCreationV2Error.invalidEntries
+        }
+        guard !entries.isEmpty,
+              Set(entries.map { $0.exercise.id }).count == entries.count else {
+            throw WorkoutCreationV2Error.invalidEntries
+        }
         guard case let .success(validated) = WorkoutSetDraftEditing.validatedEntries(entries) else {
             throw WorkoutCreationV2Error.invalidEntries
         }
@@ -822,12 +1059,8 @@ enum MetricValueRevisionLinkingError: LocalizedError {
             try persist(context)
             return workout
         } catch {
-            for link in links { context.delete(link) }
-            for value in values { context.delete(value) }
-            for set in sets { context.delete(set) }
-            for record in records { context.delete(record) }
-            context.delete(workout)
-            for revision in newRevisions { context.delete(revision) }
+            // clean contextからの同期処理なので、失敗時はrollbackで処理中の変更を戻す。
+            context.rollback()
             throw error
         }
     }
