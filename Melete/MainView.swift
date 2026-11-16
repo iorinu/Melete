@@ -68,6 +68,7 @@ struct MainView: View {
     @FocusState private var focusedSection: String?
     @State private var showingExerciseForm = false
     @State private var editingExercise: Exercise?
+    @State private var editingMetricExercise: Exercise?
     @State private var showingWorkoutForm = false
     @State private var pendingWorkoutDeletion: Workout?
     @State private var editingWorkout: Workout?
@@ -126,9 +127,12 @@ struct MainView: View {
         .sheet(item: $editingExercise) { exercise in
             ExerciseNameEditForm(exercise: exercise) { name in saveExerciseName(name, for: exercise) }
         }
+        .sheet(item: $editingMetricExercise) { exercise in
+            MetricDefinitionEditForm(exercise: exercise) { drafts in saveMetricDefinitions(drafts, for: exercise) }
+        }
         .sheet(isPresented: $showingWorkoutForm) {
             WorkoutForm(
-                exercises: exercises.filter { !$0.isArchived },
+                exercises: exercises.filter { !$0.isArchived && $0.metrics.contains(where: \.isActive) },
                 initialDay: WorkoutCalendarLogic.initialWorkoutDay(selectedDay: selectedWorkoutDay, now: .now, calendar: Self.workoutCalendar)
             ) { day, entries in
                 saveWorkout(day: day, entries: entries)
@@ -243,7 +247,7 @@ struct MainView: View {
             }
             if !addWorkoutBlocks.isEmpty {
                 Text([
-                    addWorkoutBlocks.contains(.noActiveExercises) ? "有効な種目を作成するか、アーカイブ済みの種目を復帰してください。" : nil,
+                    addWorkoutBlocks.contains(.noActiveExercises) ? "有効な記録項目がある種目がありません。項目を追加・復帰するか、種目を作成してください。" : nil,
                     addWorkoutBlocks.contains(.futureDay) ? "未来の日付が選択されています。今日以前の日付を選ぶか、全履歴に戻してください。" : nil,
                     addWorkoutBlocks.contains(.invalidSelectedDay) ? "選択日を読み取れません。全履歴に戻してから日付を選び直してください。" : nil
                 ].compactMap { $0 }.joined(separator: " "))
@@ -410,7 +414,7 @@ struct MainView: View {
     }
 
     private var activeExercises: [Exercise] {
-        exercises.filter { !$0.isArchived }
+        exercises.filter { !$0.isArchived && $0.metrics.contains(where: \.isActive) }
     }
 
     private var addWorkoutBlocks: [WorkoutCalendarLogic.AddWorkoutBlock] {
@@ -474,20 +478,35 @@ struct MainView: View {
     }
 
     private func exerciseRow(_ exercise: Exercise) -> some View {
-        HStack {
+        HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(exercise.name).font(.headline)
-                Text(exercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }.map { "\($0.name)（\($0.unit)）\($0.isRequired ? "・必須" : "・任意")" }.joined(separator: "、"))
-                    .foregroundStyle(.secondary)
+                let metrics = exercise.metrics.sorted { $0.sortOrder == $1.sortOrder ? $0.id.uuidString < $1.id.uuidString : $0.sortOrder < $1.sortOrder }
+                if metrics.isEmpty {
+                    Text("記録項目はありません").foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(metrics) { metric in
+                            HStack(spacing: 6) {
+                                Image(systemName: metric.isActive ? "checkmark.circle.fill" : "minus.circle")
+                                    .foregroundStyle(metric.isActive ? MeleteStyle.accent : .secondary)
+                                Text("\(metric.name)（\(metric.unit)）・\(metric.allowsDecimal ? "小数" : "整数")・\(metric.isRequired ? "必須" : "任意")")
+                                    .foregroundStyle(metric.isActive ? .primary : .secondary)
+                            }.font(.subheadline)
+                        }
+                    }
+                }
             }
             Spacer()
+            Button("項目を管理") { editingMetricExercise = exercise }
             Button("名前を編集", systemImage: "pencil") { editingExercise = exercise }
             Button(exercise.isArchived ? "復帰" : "アーカイブ") {
+                let original = exercise.isArchived
                 do {
                     exercise.isArchived.toggle()
                     try context.save()
                 } catch {
-                    context.rollback()
+                    exercise.isArchived = original
                     errorMessage = error.localizedDescription
                 }
             }
@@ -523,6 +542,15 @@ struct MainView: View {
     private func saveExerciseName(_ name: String, for exercise: Exercise) -> String? {
         do {
             try ExerciseNameEditing.save(name, for: exercise) { try context.save() }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private func saveMetricDefinitions(_ drafts: [MetricDefinitionDraft], for exercise: Exercise) -> String? {
+        do {
+            try MetricDefinitionEditing.save(drafts, for: exercise, insert: { context.insert($0) }, discard: { context.delete($0) }) { try context.save() }
             return nil
         } catch {
             return error.localizedDescription

@@ -26,6 +26,136 @@ enum ExerciseNameEditError: LocalizedError {
     var errorDescription: String? { "種目名を入力してください。" }
 }
 
+struct MetricDefinitionDraft: Identifiable {
+    let id: UUID
+    let original: MetricDefinitionSnapshot?
+    var name: String
+    var unit: String
+    var allowsDecimal: Bool
+    var isRequired: Bool
+    var isActive: Bool
+
+    init(name: String, unit: String, allowsDecimal: Bool, isRequired: Bool, isActive: Bool = true) {
+        id = UUID()
+        original = nil
+        self.name = name
+        self.unit = unit
+        self.allowsDecimal = allowsDecimal
+        self.isRequired = isRequired
+        self.isActive = isActive
+    }
+
+    init(existing metric: MetricDefinition) {
+        id = metric.id
+        original = MetricDefinitionSnapshot(metric)
+        name = metric.name
+        unit = metric.unit
+        allowsDecimal = metric.allowsDecimal
+        isRequired = metric.isRequired
+        isActive = metric.isActive
+    }
+}
+
+struct MetricDefinitionSnapshot: Equatable {
+    let id: UUID
+    let name: String
+    let unit: String
+    let allowsDecimal: Bool
+    let isRequired: Bool
+    let isActive: Bool
+    let sortOrder: Int
+
+    init(_ metric: MetricDefinition) {
+        id = metric.id
+        name = metric.name
+        unit = metric.unit
+        allowsDecimal = metric.allowsDecimal
+        isRequired = metric.isRequired
+        isActive = metric.isActive
+        sortOrder = metric.sortOrder
+    }
+}
+
+enum MetricDefinitionEditing {
+    static func draft(for exercise: Exercise) -> [MetricDefinitionDraft] {
+        exercise.metrics.sorted { $0.sortOrder == $1.sortOrder ? $0.id.uuidString < $1.id.uuidString : $0.sortOrder < $1.sortOrder }.map(MetricDefinitionDraft.init(existing:))
+    }
+
+    static func save(_ drafts: [MetricDefinitionDraft], for exercise: Exercise, insert: (MetricDefinition) -> Void = { _ in }, discard: (MetricDefinition) -> Void = { _ in }, persist: () throws -> Void) throws {
+        let originalMetrics = exercise.metrics
+        let originalSnapshots = originalMetrics.map(MetricDefinitionSnapshot.init)
+        let originalByID = Dictionary(uniqueKeysWithValues: originalMetrics.map { ($0.id, $0) })
+        guard Set(drafts.map(\.id)).count == drafts.count else { throw MetricDefinitionEditingError.changed }
+        guard Set(drafts.filter { $0.original != nil }.map(\.id)) == Set(originalMetrics.map(\.id)) else { throw MetricDefinitionEditingError.changed }
+        guard drafts.allSatisfy({ draft in
+            if let original = draft.original {
+                return originalByID[draft.id].map(MetricDefinitionSnapshot.init) == original
+                    && draft.name == original.name && draft.unit == original.unit
+                    && draft.allowsDecimal == original.allowsDecimal && draft.isRequired == original.isRequired
+            }
+            return originalByID[draft.id] == nil
+        }) else { throw MetricDefinitionEditingError.changed }
+
+        let cleaned = drafts.map { draft -> (MetricDefinitionDraft, String, String) in
+            (draft, draft.name.trimmingCharacters(in: .whitespacesAndNewlines), draft.unit.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        guard !cleaned.isEmpty, cleaned.allSatisfy({ !$0.1.isEmpty && !$0.2.isEmpty }),
+              Set(cleaned.map { $0.1.lowercased() }).count == cleaned.count else {
+            throw MetricDefinitionEditingError.invalid
+        }
+        let additions = cleaned.filter { $0.0.original == nil }
+        let maximumOrder = originalMetrics.map(\.sortOrder).max() ?? -1
+        let (lastOrder, overflow) = maximumOrder.addingReportingOverflow(additions.count)
+        guard !overflow, additions.isEmpty || lastOrder >= maximumOrder else { throw MetricDefinitionEditingError.sortOrderOverflow }
+
+        var inserted: [MetricDefinition] = []
+        var nextOrder = maximumOrder
+        for (draft, name, unit) in cleaned {
+            if let metric = originalByID[draft.id] {
+                metric.isActive = draft.isActive
+            } else {
+                let (order, orderOverflow) = nextOrder.addingReportingOverflow(1)
+                guard !orderOverflow else { throw MetricDefinitionEditingError.sortOrderOverflow }
+                let metric = MetricDefinition(name: name, unit: unit, allowsDecimal: draft.allowsDecimal, isRequired: draft.isRequired, sortOrder: order)
+                metric.isActive = draft.isActive
+                insert(metric)
+                inserted.append(metric)
+                nextOrder = order
+            }
+        }
+        exercise.metrics.append(contentsOf: inserted)
+        do {
+            try persist()
+        } catch {
+            exercise.metrics = originalMetrics
+            for (metric, snapshot) in zip(originalMetrics, originalSnapshots) {
+                metric.name = snapshot.name
+                metric.unit = snapshot.unit
+                metric.allowsDecimal = snapshot.allowsDecimal
+                metric.isRequired = snapshot.isRequired
+                metric.isActive = snapshot.isActive
+                metric.sortOrder = snapshot.sortOrder
+            }
+            inserted.forEach(discard)
+            throw error
+        }
+    }
+}
+
+enum MetricDefinitionEditingError: LocalizedError {
+    case invalid
+    case changed
+    case sortOrderOverflow
+
+    var errorDescription: String? {
+        switch self {
+        case .invalid: "種目名・項目名・単位を入力してください。項目名は重複できません。"
+        case .changed: "項目定義が別の画面で変更されました。画面を開き直してから再度お試しください。"
+        case .sortOrderOverflow: "項目の表示順の上限に達したため、追加できません。"
+        }
+    }
+}
+
 enum WorkoutDeletion {
     static func delete(workoutID: UUID, in context: ModelContext) throws {
         let descriptor = FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })

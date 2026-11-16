@@ -3,6 +3,164 @@ import SwiftData
 @testable import Melete
 
 final class MeleteTests: XCTestCase {
+    func testMetricDefinitionEditingAddsAndTogglesWithoutChangingSnapshots() throws {
+        let existing = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+        let exercise = Exercise(name: "種目", metrics: [existing])
+        let oldValue = MetricValue(metric: existing, scaledValue: 12_500)
+        let oldSet = SetRecord(sortOrder: 1, values: [oldValue])
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [oldSet])
+        let workout = Workout(day: .now, records: [record])
+        var draft = MetricDefinitionEditing.draft(for: exercise)
+        draft.append(MetricDefinitionDraft(name: " 回数 ", unit: " 回 ", allowsDecimal: false, isRequired: false))
+        draft[0].isActive = false
+
+        XCTAssertNoThrow(try MetricDefinitionEditing.save(draft, for: exercise) {})
+        XCTAssertEqual(exercise.metrics.map(\.id), [existing.id, exercise.metrics[1].id])
+        XCTAssertFalse(existing.isActive)
+        XCTAssertEqual(exercise.metrics[1].name, "回数")
+        XCTAssertEqual(exercise.metrics[1].unit, "回")
+        XCTAssertFalse(exercise.metrics[1].allowsDecimal)
+        XCTAssertFalse(exercise.metrics[1].isRequired)
+        XCTAssertEqual(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise)?.metrics.map(\.name), ["回数"])
+        XCTAssertEqual(oldValue.metricID, existing.id)
+        XCTAssertEqual(oldValue.name, "重量")
+        XCTAssertEqual(oldValue.scaledValue, 12_500)
+        XCTAssertEqual(workout.records.first?.sets.first?.values.count, 1)
+
+        let addition = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+        var filledAddition = addition
+        filledAddition.values[exercise.metrics[1].id] = "8"
+        let day = try XCTUnwrap(WorkoutValueEditing.date(from: workout.day))
+        XCTAssertNoThrow(try WorkoutValueEditing.save([], additions: [filledAddition], day: day, to: workout, exercises: [exercise]) {})
+        let addedSet = try XCTUnwrap(record.sets.first { $0.sortOrder == 2 })
+        XCTAssertEqual(addedSet.values.map(\.metricID), [exercise.metrics[1].id])
+        XCTAssertEqual(addedSet.values.first?.scaledValue, 8_000)
+
+        exercise.metrics[1].isActive = false
+        XCTAssertThrowsError(try WorkoutValueEditing.save([], additions: [addition], day: day, to: workout, exercises: [exercise]) {}) { error in
+            XCTAssertEqual((error as? WorkoutValueEditError)?.errorDescription, WorkoutValueEditError.metricsChanged.errorDescription)
+        }
+        XCTAssertTrue(record.sets.allSatisfy { $0.values.count == 1 || $0.sortOrder == 2 })
+    }
+
+    func testMetricDefinitionEditingRejectsInvalidNamesAndSortOrderOverflowWithoutMutation() throws {
+        let first = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: Int.max)
+        let exercise = Exercise(name: "種目", metrics: [first])
+        for candidate in [
+            MetricDefinitionDraft(name: " 重量 ", unit: "lb", allowsDecimal: false, isRequired: false),
+            MetricDefinitionDraft(name: "  ", unit: "回", allowsDecimal: false, isRequired: false),
+            MetricDefinitionDraft(name: "回数", unit: " \n", allowsDecimal: false, isRequired: false)
+        ] {
+            XCTAssertThrowsError(try MetricDefinitionEditing.save([MetricDefinitionDraft(existing: first), candidate], for: exercise) {})
+            XCTAssertEqual(exercise.metrics.map(\.id), [first.id])
+            XCTAssertEqual(first.name, "重量")
+        }
+
+        let valid = [MetricDefinitionDraft(existing: first), MetricDefinitionDraft(name: "回数", unit: "回", allowsDecimal: false, isRequired: true)]
+        XCTAssertThrowsError(try MetricDefinitionEditing.save(valid, for: exercise) {}) { error in
+            XCTAssertEqual((error as? MetricDefinitionEditingError)?.errorDescription, MetricDefinitionEditingError.sortOrderOverflow.errorDescription)
+        }
+        XCTAssertEqual(exercise.metrics.map(\.id), [first.id])
+    }
+
+    func testMetricDefinitionEditingRestoresOnlyTargetOnSaveFailureAndRejectsStaleDraft() throws {
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+        let exercise = Exercise(name: "種目", metrics: [metric])
+        let other = MetricDefinition(name: "回数", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 0)
+        let otherExercise = Exercise(name: "別種目", metrics: [other])
+        var draft = MetricDefinitionEditing.draft(for: exercise)
+        draft[0].isActive = false
+        draft.append(MetricDefinitionDraft(name: "距離", unit: "m", allowsDecimal: true, isRequired: false))
+        other.name = "未保存の変更"
+
+        XCTAssertThrowsError(try MetricDefinitionEditing.save(draft, for: exercise) {
+            throw NSError(domain: "InjectedSaveFailure", code: 1)
+        })
+        XCTAssertTrue(metric.isActive)
+        XCTAssertEqual(exercise.metrics.map(\.id), [metric.id])
+        XCTAssertEqual(other.name, "未保存の変更")
+        XCTAssertEqual(otherExercise.metrics.first?.name, "未保存の変更")
+
+        var stale = MetricDefinitionEditing.draft(for: exercise)
+        stale[0].isActive = false
+        metric.name = "別画面の変更"
+        XCTAssertThrowsError(try MetricDefinitionEditing.save(stale, for: exercise) {}) { error in
+            XCTAssertEqual((error as? MetricDefinitionEditingError)?.errorDescription, MetricDefinitionEditingError.changed.errorDescription)
+        }
+        XCTAssertEqual(metric.name, "別画面の変更")
+        XCTAssertTrue(metric.isActive)
+    }
+
+    func testMetricDefinitionEditingPersistsAndReopensAddedAndInactiveDefinitions() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteMetricDefinitionEdit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("MetricDefinitionEdit", schema: schema, url: directory.appendingPathComponent("test.store"), cloudKitDatabase: .none)
+        let exerciseID = UUID()
+        let existingMetricID = UUID()
+        let newMetricID: UUID
+
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            let existing = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+            existing.id = existingMetricID
+            let exercise = Exercise(name: "種目", metrics: [existing])
+            exercise.id = exerciseID
+            let oldValue = MetricValue(metric: existing, scaledValue: 12_500)
+            let workout = Workout(day: .now, records: [ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [oldValue])])])
+            context.insert(exercise)
+            context.insert(workout)
+            try context.save()
+
+            var drafts = MetricDefinitionEditing.draft(for: exercise)
+            drafts[0].isActive = false
+            drafts.append(MetricDefinitionDraft(name: " 回数 ", unit: " 回 ", allowsDecimal: false, isRequired: false))
+            try MetricDefinitionEditing.save(drafts, for: exercise, insert: { context.insert($0) }, discard: { context.delete($0) }) { try context.save() }
+            newMetricID = try XCTUnwrap(exercise.metrics.first { $0.name == "回数" }?.id)
+            XCTAssertEqual(oldValue.name, "重量")
+            XCTAssertEqual(oldValue.scaledValue, 12_500)
+        }
+
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let savedExercise = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Exercise>()).first { $0.id == exerciseID })
+        let savedExisting = try XCTUnwrap(savedExercise.metrics.first { $0.id == existingMetricID })
+        let savedNew = try XCTUnwrap(savedExercise.metrics.first { $0.id == newMetricID })
+        XCTAssertFalse(savedExisting.isActive)
+        XCTAssertEqual(savedExisting.sortOrder, 0)
+        XCTAssertEqual(savedNew.name, "回数")
+        XCTAssertEqual(savedNew.unit, "回")
+        XCTAssertFalse(savedNew.allowsDecimal)
+        XCTAssertFalse(savedNew.isRequired)
+        XCTAssertTrue(savedNew.isActive)
+        XCTAssertEqual(savedNew.sortOrder, 1)
+        let savedWorkout = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first)
+        let savedValue = try XCTUnwrap(savedWorkout.records.first?.sets.first?.values.first)
+        XCTAssertEqual(savedValue.metricID, existingMetricID)
+        XCTAssertEqual(savedValue.name, "重量")
+        XCTAssertEqual(savedValue.scaledValue, 12_500)
+    }
+
+    func testMetricDefinitionEditingAllowsNoActiveItemsButBlocksNewWorkoutSet() throws {
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: true, isRequired: true, sortOrder: 0)
+        let exercise = Exercise(name: "種目", metrics: [metric])
+        var drafts = MetricDefinitionEditing.draft(for: exercise)
+        drafts[0].isActive = false
+        XCTAssertNoThrow(try MetricDefinitionEditing.save(drafts, for: exercise) {})
+        XCTAssertFalse(metric.isActive)
+
+        let entry = WorkoutEntryDraft(exercise: exercise)
+        if case .success = WorkoutSetDraftEditing.validatedEntries([entry]) {
+            XCTFail("有効項目がない種目の新規セット入力を拒否する")
+        }
+        XCTAssertTrue(exercise.metrics.contains { !$0.isActive }, "項目定義自体は復帰可能な状態で保持する")
+        var restoredDrafts = MetricDefinitionEditing.draft(for: exercise)
+        restoredDrafts[0].isActive = true
+        XCTAssertNoThrow(try MetricDefinitionEditing.save(restoredDrafts, for: exercise) {})
+        XCTAssertTrue(exercise.metrics[0].isActive)
+    }
+
     func testWorkoutSetDraftCopyKeepsRawInputsButGetsIndependentIdentityAndNoParsedCache() {
         let metricID = UUID()
         var source = WorkoutSetDraft(values: [metricID: " 1.2345 ", UUID(): ""])

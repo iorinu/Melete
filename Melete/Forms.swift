@@ -129,6 +129,70 @@ struct ExerciseNameEditForm: View {
     }
 }
 
+struct MetricDefinitionEditForm: View {
+    @Environment(\.dismiss) private var dismiss
+    let exercise: Exercise
+    var onSave: ([MetricDefinitionDraft]) -> String?
+    @State private var metrics: [MetricDefinitionDraft]
+    @State private var validationError: String?
+
+    init(exercise: Exercise, onSave: @escaping ([MetricDefinitionDraft]) -> String?) {
+        self.exercise = exercise
+        self.onSave = onSave
+        _metrics = State(initialValue: MetricDefinitionEditing.draft(for: exercise))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("記録項目を管理").font(.system(.title, design: .rounded).weight(.bold))
+                Text("\(exercise.name)の項目を追加し、入力欄で使うかを選びます。過去の記録は変更されません。")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+            Form {
+                Section("項目一覧") {
+                    ForEach($metrics) { $metric in
+                        VStack(alignment: .leading, spacing: 8) {
+                            if metric.original == nil {
+                                TextField("項目名（例: 重量）", text: $metric.name)
+                                HStack {
+                                    TextField("単位（例: kg）", text: $metric.unit).frame(maxWidth: 130)
+                                    Picker("形式", selection: $metric.allowsDecimal) {
+                                        Text("整数").tag(false)
+                                        Text("小数（第3位まで）").tag(true)
+                                    }.frame(maxWidth: 200)
+                                    Toggle("必須", isOn: $metric.isRequired).toggleStyle(.checkbox)
+                                }
+                            } else {
+                                Text("\(metric.name)（\(metric.unit)）・\(metric.allowsDecimal ? "小数" : "整数")・\(metric.isRequired ? "必須" : "任意")")
+                                    .font(.subheadline.weight(.medium))
+                            }
+                            Toggle(metric.isActive ? "入力欄で使用中" : "入力欄から外しています", isOn: $metric.isActive)
+                                .toggleStyle(.switch)
+                        }
+                        .padding(.vertical, 5)
+                    }
+                    Button("項目を追加", systemImage: "plus") {
+                        metrics.append(MetricDefinitionDraft(name: "", unit: "", allowsDecimal: false, isRequired: true))
+                    }
+                }
+            }
+            if let validationError { Text(validationError).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("キャンセル") { dismiss() }
+                Button("保存") {
+                    if let error = onSave(metrics) { validationError = error } else { dismiss() }
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(26)
+        .frame(minWidth: 600, idealWidth: 670, minHeight: 450, idealHeight: 620)
+        .tint(FormStyle.accent)
+    }
+}
+
 struct WorkoutEntryDraft: Identifiable {
     let id = UUID()
     let exercise: Exercise
@@ -168,6 +232,9 @@ enum WorkoutSetDraftEditing {
     static func validatedEntries(_ entries: [WorkoutEntryDraft]) -> Result<[WorkoutEntryDraft], WorkoutSetDraftValidationError> {
         for entry in entries {
             let metrics = entry.exercise.metrics.filter(\.isActive)
+            guard !metrics.isEmpty else {
+                return .failure(WorkoutSetDraftValidationError(message: "\(entry.exercise.name)は有効な記録項目がないため、セットを保存できません。項目を復帰してから再度お試しください。"))
+            }
             for (index, set) in entry.sets.enumerated() {
                 for metric in metrics {
                     let raw = set.values[metric.id] ?? ""
@@ -427,8 +494,13 @@ struct WorkoutValueEditForm: View {
                             }.padding(.vertical, 4)
                         }
                         if let exercise = exercises.first(where: { $0.id == record.exerciseID && !$0.isArchived }) {
-                            Button("セットを追加", systemImage: "plus") {
-                                if let draft = WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise) { additions.append(draft) }
+                            if exercise.metrics.contains(where: \.isActive) {
+                                Button("セットを追加", systemImage: "plus") {
+                                    if let draft = WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise) { additions.append(draft) }
+                                }
+                            } else {
+                                Text("有効な項目がないため、この種目にセットを追加できません。項目を復帰してから再度お試しください。")
+                                    .font(.footnote).foregroundStyle(.secondary)
                             }
                         }
                     }
