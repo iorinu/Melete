@@ -172,6 +172,143 @@ enum WorkoutDeletion {
     }
 }
 
+struct WorkoutValueSnapshot: Equatable {
+    let id: UUID
+    let metricID: UUID
+    let name: String
+    let unit: String
+    let allowsDecimal: Bool
+    let isRequired: Bool
+    let scaledValue: Int64?
+
+    init(_ value: MetricValue) {
+        id = value.id; metricID = value.metricID; name = value.name; unit = value.unit
+        allowsDecimal = value.allowsDecimal; isRequired = value.isRequired; scaledValue = value.scaledValue
+    }
+}
+
+struct WorkoutSetSnapshot: Equatable {
+    let id: UUID
+    let sortOrder: Int
+    let values: [WorkoutValueSnapshot]
+
+    init(_ set: SetRecord) {
+        id = set.id; sortOrder = set.sortOrder
+        values = set.values.map(WorkoutValueSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+}
+
+struct WorkoutRecordSnapshot: Equatable {
+    let id: UUID
+    let exerciseID: UUID
+    let exerciseName: String
+    let sortOrder: Int
+    let sets: [WorkoutSetSnapshot]
+
+    init(_ record: ExerciseRecord) {
+        id = record.id; exerciseID = record.exerciseID; exerciseName = record.exerciseName; sortOrder = record.sortOrder
+        sets = record.sets.map(WorkoutSetSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+}
+
+struct WorkoutSetDeletionTarget: Equatable {
+    let workoutID: UUID
+    let recordID: UUID
+    let setID: UUID
+    let recordSnapshot: WorkoutRecordSnapshot
+    let workoutRecords: [WorkoutRecordSnapshot]
+    let workoutDay: String
+
+    init(workout: Workout, record: ExerciseRecord, set: SetRecord) {
+        workoutID = workout.id
+        recordID = record.id
+        setID = set.id
+        recordSnapshot = WorkoutRecordSnapshot(record)
+        workoutRecords = workout.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        workoutDay = workout.day
+    }
+}
+
+struct WorkoutRecordDeletionTarget: Equatable {
+    let workoutID: UUID
+    let workoutDay: String
+    let record: WorkoutRecordSnapshot
+    let workoutRecords: [WorkoutRecordSnapshot]
+
+    init(workout: Workout, record: ExerciseRecord) {
+        workoutID = workout.id; workoutDay = workout.day
+        self.record = WorkoutRecordSnapshot(record)
+        workoutRecords = workout.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+}
+
+@MainActor enum WorkoutSetDeletion {
+    static func delete(_ target: WorkoutSetDeletionTarget, in context: ModelContext, persist: () throws -> Void) throws {
+        guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        let workoutID = target.workoutID
+        let descriptor = FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })
+        guard let workout = try context.fetch(descriptor).first,
+              workout.day == target.workoutDay,
+              let record = workout.records.first(where: { $0.id == target.recordID }),
+              workout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == target.workoutRecords,
+              WorkoutRecordSnapshot(record) == target.recordSnapshot,
+              let set = record.sets.first(where: { $0.id == target.setID }) else {
+            throw WorkoutSetDeletionError.changed
+        }
+        guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+
+        if record.sets.count == 1 {
+            workout.records.removeAll { $0.id == record.id }
+            record.workout = nil
+            context.delete(record)
+        } else {
+            record.sets.removeAll { $0.id == set.id }
+            set.exerciseRecord = nil
+            context.delete(set)
+        }
+        if workout.records.isEmpty {
+            context.delete(workout)
+        }
+        do {
+            try persist()
+        } catch {
+            // 開始時にcleanで、削除とsaveの間に他の処理を挟まないため、このcontext内の変更は削除分のみ。
+            context.rollback()
+            throw error
+        }
+    }
+}
+
+@MainActor enum WorkoutRecordDeletion {
+    static func delete(_ target: WorkoutRecordDeletionTarget, in context: ModelContext, persist: () throws -> Void) throws {
+        guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        let workoutID = target.workoutID
+        let descriptor = FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })
+        guard let workout = try context.fetch(descriptor).first, workout.day == target.workoutDay,
+              workout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == target.workoutRecords,
+              let record = workout.records.first(where: { $0.id == target.record.id }),
+              WorkoutRecordSnapshot(record) == target.record else { throw WorkoutSetDeletionError.changed }
+        guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        workout.records.removeAll { $0.id == record.id }
+        record.workout = nil
+        context.delete(record)
+        if workout.records.isEmpty { context.delete(workout) }
+        do { try persist() } catch { context.rollback(); throw error }
+    }
+}
+
+enum WorkoutSetDeletionError: LocalizedError {
+    case unsavedContext
+    case changed
+
+    var errorDescription: String? {
+        switch self {
+        case .unsavedContext: "未保存の変更があります。先に保存するか、画面を開き直してから削除してください。"
+        case .changed: "削除対象が確認後に変更されました。画面を更新してから再度お試しください。"
+        }
+    }
+}
+
 enum WorkoutDeletionError: LocalizedError {
     case notFound
 
@@ -180,7 +317,7 @@ enum WorkoutDeletionError: LocalizedError {
     }
 }
 
-struct WorkoutValueEditDraft {
+struct WorkoutValueEditDraft: Equatable {
     let valueID: UUID
     let exerciseName: String
     let setOrder: Int
@@ -247,6 +384,10 @@ struct WorkoutSetMetricDraft: Equatable {
 }
 
 enum WorkoutValueEditing {
+    static func deletionDraftsAreClean(_ drafts: [WorkoutValueEditDraft], originalDrafts: [WorkoutValueEditDraft], day: Date, originalDay: Date, additions: [WorkoutSetAdditionDraft]) -> Bool {
+        drafts == originalDrafts && additions.isEmpty && Calendar.current.startOfDay(for: day) == Calendar.current.startOfDay(for: originalDay)
+    }
+
     static func date(from day: String, calendar: Calendar = .current) -> Date? {
         let parts = day.split(separator: "-", omittingEmptySubsequences: false)
         guard parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,

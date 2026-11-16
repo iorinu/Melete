@@ -421,15 +421,21 @@ struct WorkoutValueEditForm: View {
     let workout: Workout
     let exercises: [Exercise]
     var onSave: (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?
+    var onDeleteSet: (WorkoutSetDeletionTarget) -> String?
+    var onDeleteRecord: (WorkoutRecordDeletionTarget) -> String?
     @State private var drafts: [WorkoutValueEditDraft]
     @State private var day: Date
     @State private var validationError: String?
     @State private var additions = WorkoutSetAdditionDrafts()
+    @State private var pendingSetDeletion: WorkoutSetDeletionTarget?
+    @State private var pendingRecordDeletion: WorkoutRecordDeletionTarget?
 
-    init(workout: Workout, exercises: [Exercise], onSave: @escaping (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?) {
+    init(workout: Workout, exercises: [Exercise], onSave: @escaping (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?, onDeleteSet: @escaping (WorkoutSetDeletionTarget) -> String? = { _ in "削除を利用できません。" }, onDeleteRecord: @escaping (WorkoutRecordDeletionTarget) -> String? = { _ in "削除を利用できません。" }) {
         self.workout = workout
         self.exercises = exercises
         self.onSave = onSave
+        self.onDeleteSet = onDeleteSet
+        self.onDeleteRecord = onDeleteRecord
         _drafts = State(initialValue: WorkoutValueEditing.drafts(for: workout))
         let storedDay = WorkoutValueEditing.date(from: workout.day)
         _day = State(initialValue: storedDay ?? Calendar.current.startOfDay(for: .now))
@@ -448,9 +454,15 @@ struct WorkoutValueEditForm: View {
                     .disabled(WorkoutValueEditing.date(from: workout.day) == nil)
                 ForEach(workout.records.sorted { $0.sortOrder < $1.sortOrder }) { record in
                     Section(record.exerciseName) {
+                        Button("この種目記録を削除", role: .destructive) {
+                            pendingRecordDeletion = WorkoutRecordDeletionTarget(workout: workout, record: record)
+                        }
                         ForEach(record.sets.sorted { $0.sortOrder < $1.sortOrder }) { set in
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("セット \(set.sortOrder)").font(.headline)
+                                Button("このセットを削除", role: .destructive) {
+                                    pendingSetDeletion = WorkoutSetDeletionTarget(workout: workout, record: record, set: set)
+                                }
                                 ForEach(drafts.indices.filter { index in
                                     set.values.contains { $0.id == drafts[index].valueID }
                                 }, id: \.self) { index in
@@ -519,6 +531,25 @@ struct WorkoutValueEditForm: View {
         .padding(26)
         .frame(minWidth: 620, idealWidth: 680, minHeight: 500, idealHeight: 620)
         .tint(FormStyle.accent)
+        .confirmationDialog("セットを削除しますか？", isPresented: Binding(get: { pendingSetDeletion != nil }, set: { if !$0 { pendingSetDeletion = nil } }), titleVisibility: .visible) {
+            Button("このセットを削除", role: .destructive) { confirmSetDeletion() }
+            Button("キャンセル", role: .cancel) { pendingSetDeletion = nil }
+        } message: {
+            if let target = pendingSetDeletion {
+                let record = target.recordSnapshot
+                let set = record.sets.first { $0.id == target.setID }
+                Text("対象日: \(target.workoutDay)\n種目: \(record.exerciseName)\nセット \(set?.sortOrder ?? 0): \(set.map(Self.valueSummary) ?? "値なし")\n\(record.sets.count == 1 ? "最後のセットのため種目記録も削除されます。" : "他のセットは残ります。")\n\(target.workoutRecords.count == 1 && record.sets.count == 1 ? "最後の種目記録のためWorkout全体も削除されます。" : "Workoutと他の種目記録は残ります。")\n削除後は元に戻せません。")
+            }
+        }
+        .confirmationDialog("種目記録を削除しますか？", isPresented: Binding(get: { pendingRecordDeletion != nil }, set: { if !$0 { pendingRecordDeletion = nil } }), titleVisibility: .visible) {
+            Button("この種目記録を削除", role: .destructive) { confirmRecordDeletion() }
+            Button("キャンセル", role: .cancel) { pendingRecordDeletion = nil }
+        } message: {
+            if let target = pendingRecordDeletion {
+                let record = target.record
+                Text("対象日: \(target.workoutDay)\n種目: \(record.exerciseName)\nセット数: \(record.sets.count)\n\(record.sets.sorted { $0.sortOrder < $1.sortOrder }.map { "セット \($0.sortOrder): \(Self.valueSummary($0))" }.joined(separator: "\n"))\n\(target.workoutRecords.count == 1 ? "最後の種目記録のためWorkout全体も削除されます。" : "他の種目記録とWorkoutは残ります。")\n削除後は元に戻せません。")
+            }
+        }
     }
 
     private func save() {
@@ -537,6 +568,39 @@ struct WorkoutValueEditForm: View {
                 dismiss()
             }
         }
+    }
+
+    private func confirmSetDeletion() {
+        guard let target = pendingSetDeletion else { return }
+        pendingSetDeletion = nil
+        let originalDrafts = WorkoutValueEditing.drafts(for: workout)
+        guard let originalDay = WorkoutValueEditing.date(from: workout.day),
+              WorkoutValueEditing.deletionDraftsAreClean(drafts, originalDrafts: originalDrafts, day: day, originalDay: originalDay, additions: additions.items) else {
+            validationError = "日付・数値・追加セットに未保存の入力があります。保存または取り消してから削除してください。"
+            return
+        }
+        if let error = onDeleteSet(target) { validationError = error }
+        else { dismiss() }
+    }
+
+    private func confirmRecordDeletion() {
+        guard let target = pendingRecordDeletion else { return }
+        pendingRecordDeletion = nil
+        let originalDrafts = WorkoutValueEditing.drafts(for: workout)
+        guard let originalDay = WorkoutValueEditing.date(from: workout.day),
+              WorkoutValueEditing.deletionDraftsAreClean(drafts, originalDrafts: originalDrafts, day: day, originalDay: originalDay, additions: additions.items) else {
+            validationError = "日付・数値・追加セットに未保存の入力があります。保存または取り消してから削除してください。"
+            return
+        }
+        if let error = onDeleteRecord(target) { validationError = error } else { dismiss() }
+    }
+
+    private static func valueSummary(_ set: WorkoutSetSnapshot) -> String {
+        let summary = set.values.map { value in
+            let amount = value.scaledValue.map { NSDecimalNumber(decimal: Decimal($0) / Decimal(1000)).stringValue } ?? "未入力"
+            return "\(value.name): \(amount)\(value.unit)"
+        }.joined(separator: "、")
+        return summary.isEmpty ? "値なし" : summary
     }
 
     private func additionBinding(draftID: UUID, metric: WorkoutSetMetricDraft) -> Binding<String> {

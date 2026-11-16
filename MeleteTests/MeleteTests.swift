@@ -1159,4 +1159,191 @@ final class MeleteTests: XCTestCase {
         XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<SetRecord>()).count, 1)
         XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<MetricValue>()).count, 1)
     }
+
+    @MainActor
+    func testInvestigationSeparateContextSetDeletionRefreshesCachedWorkoutRelationships() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteContextRefreshProbe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("ContextRefreshProbe", schema: schema, url: directory.appendingPathComponent("probe.store"), cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let mainContext = container.mainContext
+        let deletionContext = ModelContext(container)
+
+        let metric = MetricDefinition(name: "Probe", unit: "unit", allowsDecimal: false, isRequired: false, sortOrder: 0)
+        let sets = [1, 2, 3].map { order in
+            SetRecord(sortOrder: order, values: [MetricValue(metric: metric, scaledValue: Int64(order * 1_000))])
+        }
+        let record = ExerciseRecord(exercise: Exercise(name: "Synthetic", metrics: [metric]), sortOrder: 0, sets: sets)
+        let workout = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [record])
+        let workoutID = workout.id
+        let otherWorkout = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [])
+        mainContext.insert(workout)
+        mainContext.insert(otherWorkout)
+        try mainContext.save()
+
+        let targetID = try XCTUnwrap(sets.first { $0.sortOrder == 2 }?.id)
+        let cachedWorkout = try XCTUnwrap(mainContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workoutID })
+        let deletionWorkout = try XCTUnwrap(deletionContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workoutID })
+        let cachedRecord = try XCTUnwrap(cachedWorkout.records.first)
+        let deletionSet = try XCTUnwrap(deletionWorkout.records.first?.sets.first { $0.id == targetID })
+        let before = cachedRecord.sets.map(\.sortOrder).sorted()
+        otherWorkout.day = "unsaved-main-context-change"
+
+        deletionContext.delete(deletionSet)
+        try deletionContext.save()
+        let immediatelyAfterSave = cachedRecord.sets.map(\.sortOrder).sorted()
+        mainContext.processPendingChanges()
+        let afterProcessing = cachedRecord.sets.map(\.sortOrder).sorted()
+        let afterExplicitFetch = try mainContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workoutID }?.records.first?.sets.map(\.sortOrder).sorted() ?? []
+        let freshContext = ModelContext(container)
+        let freshResult = try freshContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workoutID }?.records.first?.sets.map(\.sortOrder).sorted() ?? []
+        let unsavedOtherDayAfter = otherWorkout.day
+
+        print("CONTEXT_REFRESH_PROBE before=\(before) afterSave=\(immediatelyAfterSave) afterProcessPendingChanges=\(afterProcessing) afterExplicitFetch=\(afterExplicitFetch) freshContext=\(freshResult) unsavedOtherWorkoutDay=\(unsavedOtherDayAfter)")
+        XCTAssertEqual(before, [1, 2, 3])
+        XCTAssertEqual(freshResult, [1, 3], "新規contextのfetchを永続化状態の比較基準とする")
+        XCTAssertEqual(unsavedOtherDayAfter, "unsaved-main-context-change", "別Workoutの未保存変更を保持する")
+    }
+
+    @MainActor
+    func testConfirmedPartialSetDeletionIsScopedAndRollsBackOnlyItsCleanContext() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeletePartialDelete-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("PartialDelete", schema: schema, url: directory.appendingPathComponent("test.store"), cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: false, isRequired: false, sortOrder: 0)
+        let targetSets = [1, 2].map { SetRecord(sortOrder: $0, values: [MetricValue(metric: metric, scaledValue: Int64($0 * 1000))]) }
+        let exercise = Exercise(name: "対象種目", metrics: [metric])
+        let targetRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: targetSets)
+        let targetWorkout = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [targetRecord])
+        let otherRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [])])
+        let otherWorkout = Workout(day: Date(timeIntervalSince1970: 1_794_772_800), records: [otherRecord])
+        context.insert(targetWorkout)
+        context.insert(otherWorkout)
+        try context.save()
+
+        let valueDrafts = WorkoutValueEditing.drafts(for: targetWorkout)
+        let baseDay = try XCTUnwrap(WorkoutValueEditing.date(from: targetWorkout.day))
+        XCTAssertTrue(WorkoutValueEditing.deletionDraftsAreClean(valueDrafts, originalDrafts: valueDrafts, day: baseDay, originalDay: baseDay, additions: []))
+        var editedDrafts = valueDrafts
+        editedDrafts[0].text = "99"
+        XCTAssertFalse(WorkoutValueEditing.deletionDraftsAreClean(editedDrafts, originalDrafts: valueDrafts, day: baseDay, originalDay: baseDay, additions: []), "未保存の数値draftを拒否")
+        let changedDay = Calendar.current.date(byAdding: .day, value: -1, to: baseDay)!
+        XCTAssertFalse(WorkoutValueEditing.deletionDraftsAreClean(valueDrafts, originalDrafts: valueDrafts, day: changedDay, originalDay: baseDay, additions: []), "未保存の日付draftを拒否")
+        let addition = WorkoutSetAdditionDraft(id: UUID(), recordID: targetRecord.id, exerciseID: exercise.id, exerciseName: exercise.name, metrics: [], values: [:])
+        XCTAssertFalse(WorkoutValueEditing.deletionDraftsAreClean(valueDrafts, originalDrafts: valueDrafts, day: baseDay, originalDay: baseDay, additions: [addition]), "未保存の追加draftを拒否")
+
+        let target = WorkoutSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSets[0])
+        targetWorkout.day = "unsaved synthetic change"
+        XCTAssertThrowsError(try WorkoutSetDeletion.delete(target, in: context) { try context.save() })
+        XCTAssertEqual(try context.fetch(FetchDescriptor<SetRecord>()).count, 3, "未保存contextでは何も削除しない")
+        context.rollback()
+
+        let cleanTarget = WorkoutSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSets[0])
+        XCTAssertThrowsError(try WorkoutSetDeletion.delete(cleanTarget, in: context) { throw NSError(domain: "SyntheticSaveFailure", code: 1) })
+        XCTAssertEqual(try context.fetch(FetchDescriptor<SetRecord>()).count, 3, "合成save失敗時に削除をrollback")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).count, 2)
+
+        let stale = WorkoutSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSets[0])
+        targetRecord.sets.append(SetRecord(sortOrder: 3, values: []))
+        try context.save()
+        XCTAssertThrowsError(try WorkoutSetDeletion.delete(stale, in: context) { try context.save() }, "確認後の内容変更を拒否")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<SetRecord>()).count, 4)
+
+        let staleValueTarget = WorkoutSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSets[1])
+        try XCTUnwrap(targetSets[1].values.first).scaledValue = 999_000
+        try context.save()
+        XCTAssertThrowsError(try WorkoutSetDeletion.delete(staleValueTarget, in: context) { try context.save() }, "確認後に値が変わったセットを拒否")
+        try XCTUnwrap(targetSets[1].values.first).scaledValue = 2_000
+        try context.save()
+
+        let freshRecord = try XCTUnwrap(try context.fetch(FetchDescriptor<ExerciseRecord>()).first { $0.id == targetRecord.id })
+        let freshWorkout = try XCTUnwrap(try context.fetch(FetchDescriptor<Workout>()).first { $0.id == targetWorkout.id })
+        let middleTarget = WorkoutSetDeletionTarget(workout: freshWorkout, record: freshRecord, set: try XCTUnwrap(freshRecord.sets.first { $0.sortOrder == 2 }))
+        try WorkoutSetDeletion.delete(middleTarget, in: context) { try context.save() }
+        XCTAssertEqual(try context.fetch(FetchDescriptor<SetRecord>()).filter { $0.exerciseRecord?.id == freshRecord.id }.map(\.sortOrder).sorted(), [1, 3], "対象Workoutの選択セットだけ削除")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).map(\.id).sorted { $0.uuidString < $1.uuidString }.count, 2, "別Workoutを保持")
+
+        let remainingSet = try XCTUnwrap(freshRecord.sets.first { $0.sortOrder == 3 })
+        let removeRecord = WorkoutSetDeletionTarget(workout: freshWorkout, record: freshRecord, set: remainingSet)
+        try WorkoutSetDeletion.delete(removeRecord, in: context) { try context.save() }
+        let finalSet = try XCTUnwrap(freshRecord.sets.first { $0.sortOrder == 1 })
+        let deleteLastSet = WorkoutSetDeletionTarget(workout: freshWorkout, record: freshRecord, set: finalSet)
+        try WorkoutSetDeletion.delete(deleteLastSet, in: context) { try context.save() }
+        XCTAssertFalse(try context.fetch(FetchDescriptor<ExerciseRecord>()).contains { $0.id == freshRecord.id }, "最後のセット削除で親の種目記録も削除")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).count, 1, "空になるWorkoutは削除し、別Workoutは保持")
+
+        let reopenedContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let reopened = ModelContext(reopenedContainer)
+        XCTAssertEqual(try reopened.fetch(FetchDescriptor<Workout>()).count, 1, "再オープン後も別Workoutだけを保持")
+        XCTAssertEqual(try reopened.fetch(FetchDescriptor<ExerciseRecord>()).count, 1)
+        XCTAssertEqual(try reopened.fetch(FetchDescriptor<SetRecord>()).count, 1)
+    }
+
+    @MainActor
+    func testLastSetAndLastRecordDeletionRemoveEmptyWorkoutAndReopen() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteCascadeDelete-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let configuration = ModelConfiguration("CascadeDelete", schema: schema, url: directory.appendingPathComponent("test.store"), cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = container.mainContext
+        let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: false, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let finalRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 75_000)])])
+        let finalWorkout = Workout(day: Date(timeIntervalSince1970: 1_794_686_400), records: [finalRecord])
+        let otherRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 50_000)])])
+        let survivingWorkout = Workout(day: Date(timeIntervalSince1970: 1_794_772_800), records: [otherRecord])
+        context.insert(finalWorkout)
+        context.insert(survivingWorkout)
+        try context.save()
+
+        let setTarget = WorkoutSetDeletionTarget(workout: finalWorkout, record: finalRecord, set: try XCTUnwrap(finalRecord.sets.first))
+        try WorkoutSetDeletion.delete(setTarget, in: context) { try context.save() }
+        XCTAssertFalse(try context.fetch(FetchDescriptor<Workout>()).contains { $0.id == finalWorkout.id }, "最後のセット→record→Workoutをまとめて削除")
+        XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).contains { $0.id == survivingWorkout.id }, "別Workoutを維持")
+
+        let companion = ExerciseRecord(exercise: exercise, sortOrder: 1, sets: [SetRecord(sortOrder: 1, values: [])])
+        let sharedWorkout = Workout(day: Date(timeIntervalSince1970: 1_794_945_600), records: [
+            ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 3_000)])]), companion
+        ])
+        context.insert(sharedWorkout)
+        try context.save()
+        let onlySetRecord = try XCTUnwrap(sharedWorkout.records.first { $0.id != companion.id })
+        try WorkoutSetDeletion.delete(WorkoutSetDeletionTarget(workout: sharedWorkout, record: onlySetRecord, set: try XCTUnwrap(onlySetRecord.sets.first)), in: context) { try context.save() }
+        XCTAssertEqual(sharedWorkout.records.map(\.id), [companion.id], "最後のセット削除でも他recordがあればWorkoutを保持")
+
+        let twoRecordsWorkout = Workout(day: Date(timeIntervalSince1970: 1_794_859_200), records: [
+            ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 1_000)])]),
+            ExerciseRecord(exercise: exercise, sortOrder: 1, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 2_000)])])
+        ])
+        context.insert(twoRecordsWorkout)
+        try context.save()
+        let first = try XCTUnwrap(twoRecordsWorkout.records.first)
+        let firstRecordTarget = WorkoutRecordDeletionTarget(workout: twoRecordsWorkout, record: first)
+        XCTAssertThrowsError(try WorkoutRecordDeletion.delete(firstRecordTarget, in: context) { throw NSError(domain: "SyntheticRecordSaveFailure", code: 1) }, "record削除のsave失敗を注入")
+        XCTAssertTrue(context.hasChanges == false, "失敗後rollbackでcontextをcleanに戻す")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<ExerciseRecord>()).filter { $0.workout?.id == twoRecordsWorkout.id }.count, 2, "失敗時に両recordを保持")
+        try WorkoutRecordDeletion.delete(firstRecordTarget, in: context) { try context.save() }
+        XCTAssertEqual(twoRecordsWorkout.records.count, 1, "非最後のrecordだけを削除")
+        XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).contains { $0.id == twoRecordsWorkout.id })
+
+        let finalRemainingRecord = try XCTUnwrap(twoRecordsWorkout.records.first)
+        let stale = WorkoutRecordDeletionTarget(workout: twoRecordsWorkout, record: finalRemainingRecord)
+        finalRemainingRecord.sets[0].values[0].scaledValue = 99_000
+        try context.save()
+        XCTAssertThrowsError(try WorkoutRecordDeletion.delete(stale, in: context) { try context.save() }, "確認後に値が変わったrecordを拒否")
+        let current = try XCTUnwrap(try context.fetch(FetchDescriptor<Workout>()).first { $0.id == twoRecordsWorkout.id })
+        try WorkoutRecordDeletion.delete(WorkoutRecordDeletionTarget(workout: current, record: try XCTUnwrap(current.records.first)), in: context) { try context.save() }
+        XCTAssertFalse(try context.fetch(FetchDescriptor<Workout>()).contains { $0.id == twoRecordsWorkout.id }, "最後のrecord削除でWorkoutも削除")
+
+        let reopenedContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let reopened = ModelContext(reopenedContainer)
+        XCTAssertEqual(Set(try reopened.fetch(FetchDescriptor<Workout>()).map(\.id)), [survivingWorkout.id, sharedWorkout.id], "再オープン後は保護対象Workoutのみ")
+        XCTAssertEqual(try reopened.fetch(FetchDescriptor<ExerciseRecord>()).count, 2)
+        XCTAssertEqual(try reopened.fetch(FetchDescriptor<SetRecord>()).count, 2)
+    }
 }

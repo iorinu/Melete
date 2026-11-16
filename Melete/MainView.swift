@@ -139,9 +139,9 @@ struct MainView: View {
             }
         }
         .sheet(item: $editingWorkout) { workout in
-            WorkoutValueEditForm(workout: workout, exercises: exercises) { day, drafts, additions in
+            WorkoutValueEditForm(workout: workout, exercises: exercises, onSave: { day, drafts, additions in
                 saveWorkoutEdits(workout: workout, day: day, drafts: drafts, additions: additions)
-            }
+            }, onDeleteSet: { target in deleteWorkoutSet(target) }, onDeleteRecord: { target in deleteWorkoutRecord(target) })
         }
         .alert("操作できませんでした", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) { errorMessage = nil }
@@ -579,6 +579,26 @@ struct MainView: View {
     private func saveWorkoutEdits(workout: Workout, day: Date, drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft]) -> String? {
         do {
             try WorkoutValueEditing.save(drafts, additions: additions, day: day, to: workout, exercises: exercises, discard: { context.delete($0) }) { try context.save() }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private func deleteWorkoutSet(_ target: WorkoutSetDeletionTarget) -> String? {
+        guard !context.hasChanges else { return WorkoutSetDeletionError.unsavedContext.localizedDescription }
+        do {
+            try WorkoutSetDeletion.delete(target, in: context) { try context.save() }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private func deleteWorkoutRecord(_ target: WorkoutRecordDeletionTarget) -> String? {
+        guard !context.hasChanges else { return WorkoutSetDeletionError.unsavedContext.localizedDescription }
+        do {
+            try WorkoutRecordDeletion.delete(target, in: context) { try context.save() }
             return nil
         } catch {
             return error.localizedDescription
