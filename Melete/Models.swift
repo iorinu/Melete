@@ -748,6 +748,7 @@ struct WorkoutSetAdditionDraft: Identifiable {
     let exerciseName: String
     let metrics: [WorkoutSetMetricDraft]
     var values: [UUID: String]
+    var historyBaselines: [UUID: MetricDefinitionHistoryBaseline]? = nil
 }
 
 struct WorkoutSetAdditionDrafts {
@@ -762,7 +763,8 @@ struct WorkoutSetAdditionDrafts {
         let source = items[index]
         let copy = WorkoutSetAdditionDraft(
             id: UUID(), recordID: source.recordID, exerciseID: source.exerciseID,
-            exerciseName: source.exerciseName, metrics: source.metrics, values: source.values
+            exerciseName: source.exerciseName, metrics: source.metrics, values: source.values,
+            historyBaselines: source.historyBaselines
         )
         items.insert(copy, at: index + 1)
     }
@@ -852,7 +854,7 @@ enum WorkoutValueEditing {
         let metrics = exercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }.map {
             WorkoutSetMetricDraft(id: $0.id, name: $0.name, unit: $0.unit, allowsDecimal: $0.allowsDecimal, isRequired: $0.isRequired)
         }
-        return WorkoutSetAdditionDraft(id: UUID(), recordID: record.id, exerciseID: exercise.id, exerciseName: exercise.name, metrics: metrics, values: [:])
+        return WorkoutSetAdditionDraft(id: UUID(), recordID: record.id, exerciseID: exercise.id, exerciseName: exercise.name, metrics: metrics, values: [:], historyBaselines: nil)
     }
 
     static func save(_ drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft], day: Date, to workout: Workout, exercises: [Exercise], calendar: Calendar = .current, now: Date = .now, discard: (SetRecord) -> Void = { _ in }, persist: () throws -> Void) throws {
@@ -1047,8 +1049,61 @@ enum MetricValueRevisionLinking {
 
 // 既存Workoutへの新規set追加用。既存値のrevision状態には触れない。
 @MainActor enum WorkoutValueEditingV2 {
+    static func appendSetDraft(for record: ExerciseRecord, exercise: Exercise, in context: ModelContext) throws -> WorkoutSetAdditionDraft? {
+        guard !context.hasChanges else { throw WorkoutCreationV2Error.unsavedContext }
+        guard var draft = WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise) else { return nil }
+        let readContext = ModelContext(context.container)
+        let revisions = try readContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        let exerciseID = exercise.id
+        let latestExercise = try readContext.fetch(FetchDescriptor<Exercise>(predicate: #Predicate { $0.id == exerciseID }))
+        guard latestExercise.count == 1, let currentExercise = latestExercise.first,
+              currentExercise.metrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == exercise.metrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else { throw WorkoutValueEditError.metricsChanged }
+        var baselines: [UUID: MetricDefinitionHistoryBaseline] = [:]
+        for metric in draft.metrics {
+            let matches = revisions.filter { $0.metricID == metric.id }
+            guard Set(matches.map(\.revision)).count == matches.count else { throw MetricValueRevisionLinkingError.duplicateRevision }
+            if let latest = matches.max(by: { $0.revision < $1.revision }) {
+                guard MetricValueRevisionLinking.matchesSnapshot(metric, revision: latest) else { throw MetricValueRevisionLinkingError.snapshotMismatch }
+                baselines[metric.id] = .latestRevision(latest.id)
+            } else { baselines[metric.id] = .noHistory }
+        }
+        draft.historyBaselines = baselines
+        return draft
+    }
+
     static func save(_ drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft], day: Date, to workout: Workout, exercises: [Exercise], in context: ModelContext, calendar: Calendar = .current, now: Date = .now, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
         guard !context.hasChanges else { throw WorkoutCreationV2Error.unsavedContext }
+        let readContext = ModelContext(context.container)
+        let freshRevisions = try readContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        var latestExercisesByID: [UUID: Exercise] = [:]
+        for exerciseID in Set(additions.map(\.exerciseID)) {
+            let matches = try readContext.fetch(FetchDescriptor<Exercise>(predicate: #Predicate { $0.id == exerciseID }))
+            guard matches.count == 1, let latestExercise = matches.first, !latestExercise.isArchived else {
+                throw WorkoutValueEditError.exerciseUnavailable
+            }
+            latestExercisesByID[exerciseID] = latestExercise
+        }
+        var batchBaselines: [UUID: MetricDefinitionHistoryBaseline] = [:]
+        for addition in additions {
+            let metricIDs = addition.metrics.map(\.id)
+            guard Set(metricIDs).count == metricIDs.count,
+                  let latestExercise = latestExercisesByID[addition.exerciseID] else {
+                throw WorkoutValueEditError.metricsChanged
+            }
+            let latestMetrics = latestExercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }.map {
+                WorkoutSetMetricDraft(id: $0.id, name: $0.name, unit: $0.unit, allowsDecimal: $0.allowsDecimal, isRequired: $0.isRequired)
+            }
+            guard latestMetrics == addition.metrics else { throw WorkoutValueEditError.metricsChanged }
+            guard let baselines = addition.historyBaselines, Set(baselines.keys) == Set(addition.metrics.map(\.id)) else { throw WorkoutValueEditError.metricsChanged }
+            for metric in addition.metrics {
+                let matches = freshRevisions.filter { $0.metricID == metric.id }
+                let actual: MetricDefinitionHistoryBaseline = matches.max(by: { $0.revision < $1.revision }).map { .latestRevision($0.id) } ?? .noHistory
+                guard baselines[metric.id] == actual else { throw WorkoutValueEditError.metricsChanged }
+                if let previous = batchBaselines[metric.id], previous != actual { throw WorkoutValueEditError.metricsChanged }
+                batchBaselines[metric.id] = actual
+            }
+        }
+        // snapshot照合からsaveまでのTOCTOU競合は、この確認だけでは防げない。
         let originalValueIDs = Set(workout.records.flatMap(\.sets).flatMap(\.values).map(\.id))
         let history = try context.fetch(FetchDescriptor<MetricDefinitionRevision>())
         var chosen: [UUID: MetricDefinitionRevision] = [:]
@@ -1307,6 +1362,34 @@ enum MetricValueRevisionLinkingError: LocalizedError {
 
 // V2専用の新規Workout保存境界。V1 containerからは呼び出さず、V2 entityをfetchしない。
 @MainActor enum WorkoutCreationV2 {
+    static func makeEntryDraft(for exercise: Exercise, in context: ModelContext) throws -> WorkoutEntryDraft {
+        guard !context.hasChanges else { throw WorkoutCreationV2Error.unsavedContext }
+        let readContext = ModelContext(context.container)
+        let exerciseID = exercise.id
+        let matches = try readContext.fetch(FetchDescriptor<Exercise>(predicate: #Predicate { $0.id == exerciseID }))
+        guard matches.count == 1, let latest = matches.first, !latest.isArchived,
+              latest.name == exercise.name,
+              latest.metrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString })
+                == exercise.metrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else {
+            throw WorkoutCreationV2Error.missingReference
+        }
+        let revisions = try readContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        var baselines: [UUID: MetricDefinitionHistoryBaseline] = [:]
+        for metric in latest.metrics where metric.isActive {
+            let matches = revisions.filter { $0.metricID == metric.id }
+            guard Set(matches.map(\.revision)).count == matches.count else { throw MetricValueRevisionLinkingError.duplicateRevision }
+            if let current = matches.max(by: { $0.revision < $1.revision }) {
+                baselines[metric.id] = .latestRevision(current.id)
+            } else { baselines[metric.id] = .noHistory }
+        }
+        var draft = WorkoutEntryDraft(exercise: exercise)
+        draft.historyBaseline = WorkoutEntryHistoryBaseline(
+            metrics: latest.metrics.map(MetricDefinitionSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString },
+            history: baselines
+        )
+        return draft
+    }
+
     static func save(day: Date, entries: [WorkoutEntryDraft], in context: ModelContext, calendar: Calendar = .current, persist: (ModelContext) throws -> Void = { try $0.save() }) throws -> Workout {
         guard !context.hasChanges else { throw WorkoutCreationV2Error.unsavedContext }
         guard calendar.startOfDay(for: day) <= calendar.startOfDay(for: .now) else {
@@ -1320,6 +1403,43 @@ enum MetricValueRevisionLinkingError: LocalizedError {
             throw WorkoutCreationV2Error.invalidEntries
         }
 
+        // 新しいcontextは永続store上の最新定義の照合だけに使う。
+        let readContext = ModelContext(context.container)
+        let freshHistory = try readContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        for entry in validated {
+            guard let baseline = entry.historyBaseline,
+                  baseline.metrics == entry.exercise.metrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else {
+                throw WorkoutCreationV2Error.missingReference
+            }
+            let activeIDs = entry.exercise.metrics.filter(\.isActive).map(\.id)
+            guard Set(activeIDs) == Set(baseline.history.keys) else { throw WorkoutCreationV2Error.missingReference }
+            for metricID in activeIDs {
+                let revisions = freshHistory.filter { $0.metricID == metricID }
+                guard Set(revisions.map(\.revision)).count == revisions.count else { throw MetricValueRevisionLinkingError.duplicateRevision }
+                let current = revisions.max(by: { $0.revision < $1.revision }).map { MetricDefinitionHistoryBaseline.latestRevision($0.id) } ?? .noHistory
+                guard baseline.history[metricID] == current else { throw WorkoutCreationV2Error.missingReference }
+            }
+            let exerciseID = entry.exercise.id
+            let latestExercises = try readContext.fetch(FetchDescriptor<Exercise>(predicate: #Predicate { $0.id == exerciseID }))
+            guard latestExercises.count == 1, let latestExercise = latestExercises.first,
+                  latestExercise.name == entry.exercise.name,
+                  !latestExercise.isArchived else { throw WorkoutCreationV2Error.missingReference }
+
+            let entryMetrics = entry.exercise.metrics.filter(\.isActive)
+            let latestMetrics = latestExercise.metrics.filter(\.isActive)
+            let entryMetricIDs = entryMetrics.map(\.id)
+            let latestMetricIDs = latestMetrics.map(\.id)
+            guard Set(entryMetricIDs).count == entryMetricIDs.count,
+                  Set(latestMetricIDs).count == latestMetricIDs.count else {
+                throw WorkoutCreationV2Error.ambiguousMetric
+            }
+            let byID = Dictionary(uniqueKeysWithValues: entryMetrics.map { ($0.id, MetricDefinitionSnapshot($0)) })
+            guard entryMetrics.count == latestMetrics.count,
+                  latestMetrics.allSatisfy({ byID[$0.id] == MetricDefinitionSnapshot($0) }) else {
+                throw WorkoutCreationV2Error.missingReference
+            }
+        }
+        // 履歴baseline照合後からsaveまでのTOCTOU競合は未解決で、この確認だけでは防げない。
         let storedExercises = try context.fetch(FetchDescriptor<Exercise>())
         let storedMetrics = try context.fetch(FetchDescriptor<MetricDefinition>())
         for entry in validated {
@@ -1445,8 +1565,16 @@ enum MeleteMigrationPlan: SchemaMigrationPlan {
         try WorkoutCreationV2.save(day: day, entries: entries, in: context, calendar: calendar)
     }
 
+    func makeWorkoutEntryDraft(for exercise: Exercise) throws -> WorkoutEntryDraft {
+        try WorkoutCreationV2.makeEntryDraft(for: exercise, in: context)
+    }
+
     func saveWorkoutEdits(_ drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft], day: Date, to workout: Workout, exercises: [Exercise], calendar: Calendar = .current, now: Date = .now) throws {
         try WorkoutValueEditingV2.save(drafts, additions: additions, day: day, to: workout, exercises: exercises, in: context, calendar: calendar, now: now)
+    }
+
+    func appendSetDraft(for record: ExerciseRecord, exercise: Exercise) throws -> WorkoutSetAdditionDraft? {
+        try WorkoutValueEditingV2.appendSetDraft(for: record, exercise: exercise, in: context)
     }
 
     func deleteSet(_ target: WorkoutSetDeletionTarget) throws {

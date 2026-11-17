@@ -329,7 +329,7 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         let exerciseB = try XCTUnwrap(try contextB.fetch(FetchDescriptor<Exercise>()).first { $0.id == exerciseID })
         XCTAssertEqual(MetricDefinitionSnapshot(try XCTUnwrap(exerciseB.metrics.first { $0.id == metricID })), definitionBefore)
 
-        var entry = WorkoutEntryDraft(exercise: exerciseB)
+        var entry = try WorkoutCreationV2.makeEntryDraft(for: exerciseB, in: contextB)
         entry.sets[0].values[metricID] = "42.5"
         let workoutB = try WorkoutCreationV2.save(day: .now, entries: [entry], in: contextB)
         let recordB = try XCTUnwrap(workoutB.records.first)
@@ -506,7 +506,7 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         XCTAssertEqual(oldValue.unit, "kg")
         XCTAssertEqual(oldValue.scaledValue, 12_500)
 
-        var entry = WorkoutEntryDraft(exercise: try XCTUnwrap(try reopened.fetch(FetchDescriptor<Exercise>()).first))
+        var entry = try WorkoutCreationV2.makeEntryDraft(for: XCTUnwrap(try reopened.fetch(FetchDescriptor<Exercise>()).first), in: reopened)
         entry.sets[0].values[fixture.metric.id] = "8.5"
         let workout = try WorkoutCreationV2.save(day: .now, entries: [entry], in: reopened)
         let newValue = try XCTUnwrap(workout.records.first?.sets.first?.values.first)
@@ -575,7 +575,7 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         XCTAssertEqual(metrics.filter(\.isActive).map(\.id).sorted { $0.uuidString < $1.uuidString }, [originalMetricID, addedMetricID].sorted { $0.uuidString < $1.uuidString })
 
         let savedWorkout = try XCTUnwrap(try restoredContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workout.id })
-        let addition = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: savedWorkout.records[0], exercise: restoredExercise))
+        let addition = try XCTUnwrap(WorkoutValueEditingV2.appendSetDraft(for: savedWorkout.records[0], exercise: restoredExercise, in: restoredContext))
         var filledAddition = addition
         filledAddition.values[originalMetricID] = "80"
         filledAddition.values[addedMetricID] = "8"
@@ -1119,13 +1119,13 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         // スタブで明示的に失敗する。実装後は同じservice APIの全操作が通る縦切りとなる。
         try service.saveMetricDefinitions(definitionDrafts, for: exercise)
 
-        var entry = WorkoutEntryDraft(exercise: exercise)
+        var entry = try WorkoutCreationV2.makeEntryDraft(for: exercise, in: context)
         entry.sets[0].values[metricID] = "2.5"
         let newWorkout = try service.createWorkout(day: Date(timeIntervalSince1970: 1_700_100_000), entries: [entry])
 
         let oldWorkout = try XCTUnwrap(try context.fetch(FetchDescriptor<Workout>()).first { $0.id == oldWorkoutID })
         let oldRecord = try XCTUnwrap(oldWorkout.records.first)
-        let addition = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: oldRecord, exercise: exercise))
+        let addition = try XCTUnwrap(service.appendSetDraft(for: oldRecord, exercise: exercise))
         var filledAddition = addition
         filledAddition.values[metricID] = "3.5"
         let existingValueDrafts = WorkoutValueEditing.drafts(for: oldWorkout)

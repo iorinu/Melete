@@ -212,6 +212,13 @@ struct WorkoutEntryDraft: Identifiable {
     let id = UUID()
     let exercise: Exercise
     var sets: [WorkoutSetDraft] = [WorkoutSetDraft()]
+    // nilはV1またはV2 baseline未取得を表す。
+    var historyBaseline: WorkoutEntryHistoryBaseline? = nil
+}
+
+struct WorkoutEntryHistoryBaseline: Equatable {
+    let metrics: [MetricDefinitionSnapshot]
+    let history: [UUID: MetricDefinitionHistoryBaseline]
 }
 
 struct WorkoutSetDraft: Identifiable {
@@ -286,13 +293,15 @@ struct WorkoutForm: View {
     @Environment(\.dismiss) private var dismiss
     let exercises: [Exercise]
     var onSave: (Date, [WorkoutEntryDraft]) -> Bool
+    var makeEntryDraft: (Exercise) throws -> WorkoutEntryDraft
     @State private var day: Date
     @State private var entries: [WorkoutEntryDraft] = []
     @State private var selectedExerciseID: UUID?
     @State private var validationError: String?
 
-    init(exercises: [Exercise], initialDay: Date? = nil, onSave: @escaping (Date, [WorkoutEntryDraft]) -> Bool) {
+    init(exercises: [Exercise], initialDay: Date? = nil, makeEntryDraft: @escaping (Exercise) throws -> WorkoutEntryDraft = { WorkoutEntryDraft(exercise: $0) }, onSave: @escaping (Date, [WorkoutEntryDraft]) -> Bool) {
         self.exercises = exercises
+        self.makeEntryDraft = makeEntryDraft
         self.onSave = onSave
         _day = State(initialValue: Calendar.current.startOfDay(for: initialDay ?? .now))
     }
@@ -400,7 +409,8 @@ struct WorkoutForm: View {
         guard let selectedExerciseID,
               let exercise = exercises.first(where: { $0.id == selectedExerciseID }),
               !entries.contains(where: { $0.exercise.id == exercise.id }) else { return }
-        entries.append(WorkoutEntryDraft(exercise: exercise))
+        do { entries.append(try makeEntryDraft(exercise)); validationError = nil }
+        catch { validationError = error.localizedDescription; return }
         self.selectedExerciseID = exercises.first(where: { candidate in !entries.contains(where: { $0.exercise.id == candidate.id }) })?.id
     }
 
@@ -436,6 +446,7 @@ struct WorkoutValueEditForm: View {
     let workout: Workout
     let exercises: [Exercise]
     var onSave: (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?
+    var makeAdditionDraft: (ExerciseRecord, Exercise) throws -> WorkoutSetAdditionDraft?
     var onDeleteSet: (WorkoutSetDeletionTarget) -> String?
     var captureSetDeletionTarget: (Workout, ExerciseRecord, SetRecord) throws -> WorkoutSetDeletionTarget
     var onDeleteRecord: (WorkoutRecordDeletionTarget) -> String?
@@ -447,10 +458,11 @@ struct WorkoutValueEditForm: View {
     @State private var pendingSetDeletion: WorkoutSetDeletionTarget?
     @State private var pendingRecordDeletion: WorkoutRecordDeletionTarget?
 
-    init(workout: Workout, exercises: [Exercise], onSave: @escaping (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?, onDeleteSet: @escaping (WorkoutSetDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureSetDeletionTarget: @escaping (Workout, ExerciseRecord, SetRecord) throws -> WorkoutSetDeletionTarget = { workout, record, set in WorkoutSetDeletionTarget(workout: workout, record: record, set: set) }, onDeleteRecord: @escaping (WorkoutRecordDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureRecordDeletionTarget: @escaping (Workout, ExerciseRecord) throws -> WorkoutRecordDeletionTarget = { workout, record in WorkoutRecordDeletionTarget(workout: workout, record: record) }) {
+    init(workout: Workout, exercises: [Exercise], onSave: @escaping (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?, makeAdditionDraft: @escaping (ExerciseRecord, Exercise) throws -> WorkoutSetAdditionDraft? = { record, exercise in WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise) }, onDeleteSet: @escaping (WorkoutSetDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureSetDeletionTarget: @escaping (Workout, ExerciseRecord, SetRecord) throws -> WorkoutSetDeletionTarget = { workout, record, set in WorkoutSetDeletionTarget(workout: workout, record: record, set: set) }, onDeleteRecord: @escaping (WorkoutRecordDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureRecordDeletionTarget: @escaping (Workout, ExerciseRecord) throws -> WorkoutRecordDeletionTarget = { workout, record in WorkoutRecordDeletionTarget(workout: workout, record: record) }) {
         self.workout = workout
         self.exercises = exercises
         self.onSave = onSave
+        self.makeAdditionDraft = makeAdditionDraft
         self.onDeleteSet = onDeleteSet
         self.captureSetDeletionTarget = captureSetDeletionTarget
         self.onDeleteRecord = onDeleteRecord
@@ -531,7 +543,8 @@ struct WorkoutValueEditForm: View {
                         if let exercise = exercises.first(where: { $0.id == record.exerciseID && !$0.isArchived }) {
                             if exercise.metrics.contains(where: \.isActive) {
                                 Button("セットを追加", systemImage: "plus") {
-                                    if let draft = WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise) { additions.append(draft) }
+                                    do { if let draft = try makeAdditionDraft(record, exercise) { additions.append(draft) } }
+                                    catch { validationError = error.localizedDescription }
                                 }
                                 .accessibilityIdentifier("addWorkoutSet_\(record.id.uuidString)")
                             } else {

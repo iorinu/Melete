@@ -138,7 +138,13 @@ struct MainView: View {
         .sheet(isPresented: $showingWorkoutForm) {
             WorkoutForm(
                 exercises: exercises.filter { !$0.isArchived && $0.metrics.contains(where: \.isActive) },
-                initialDay: WorkoutCalendarLogic.initialWorkoutDay(selectedDay: selectedWorkoutDay, now: .now, calendar: Self.workoutCalendar)
+                initialDay: WorkoutCalendarLogic.initialWorkoutDay(selectedDay: selectedWorkoutDay, now: .now, calendar: Self.workoutCalendar),
+                makeEntryDraft: { exercise in
+                    if storeMode == .isolatedV2Experimental {
+                        return try WorkoutWritingServiceV2(context: context).makeWorkoutEntryDraft(for: exercise)
+                    }
+                    return WorkoutEntryDraft(exercise: exercise)
+                }
             ) { day, entries in
                 saveWorkout(day: day, entries: entries)
             }
@@ -146,6 +152,9 @@ struct MainView: View {
         .sheet(item: $editingWorkout) { workout in
             WorkoutValueEditForm(workout: workout, exercises: exercises, onSave: { day, drafts, additions in
                 saveWorkoutEdits(workout: workout, day: day, drafts: drafts, additions: additions)
+            }, makeAdditionDraft: { record, exercise in
+                if storeMode == .isolatedV2Experimental { return try WorkoutWritingServiceV2(context: context).appendSetDraft(for: record, exercise: exercise) }
+                return WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise)
             }, onDeleteSet: { target in deleteWorkoutSet(target) }, captureSetDeletionTarget: { workout, record, set in
                 if storeMode == .isolatedV2Experimental {
                     return try WorkoutWritingServiceV2(context: context).captureSetDeletionTarget(workout: workout, record: record, set: set)

@@ -161,7 +161,7 @@ final class MeleteTests: XCTestCase {
         try context.save()
         let initialValues = workout.records.flatMap(\.sets).flatMap(\.values)
         let day = try XCTUnwrap(WorkoutValueEditing.date(from: workout.day))
-        let addition = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: workout.records[0], exercise: exercise))
+        let addition = try XCTUnwrap(WorkoutValueEditingV2.appendSetDraft(for: workout.records[0], exercise: exercise, in: context))
         var filledAddition = addition
         filledAddition.values[metric.id] = "2"
         try WorkoutValueEditingV2.save([], additions: [filledAddition], day: day, to: workout, exercises: [exercise], in: context)
@@ -198,9 +198,9 @@ final class MeleteTests: XCTestCase {
         try context.save()
 
         var additions = WorkoutSetAdditionDrafts()
-        let additionA1 = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordA, exercise: exerciseA))
-        let additionA2 = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordA, exercise: exerciseA))
-        let additionB = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: recordB, exercise: exerciseB))
+        let additionA1 = try XCTUnwrap(WorkoutValueEditingV2.appendSetDraft(for: recordA, exercise: exerciseA, in: context))
+        let additionA2 = try XCTUnwrap(WorkoutValueEditingV2.appendSetDraft(for: recordA, exercise: exerciseA, in: context))
+        let additionB = try XCTUnwrap(WorkoutValueEditingV2.appendSetDraft(for: recordB, exercise: exerciseB, in: context))
         additions.append(additionA1); additions.append(additionA2); additions.append(additionB)
         additions.setValue("2.5", draftID: additionA1.id, metricID: metricA.id)
         additions.setValue("", draftID: additionA1.id, metricID: metricB.id)
@@ -268,7 +268,7 @@ final class MeleteTests: XCTestCase {
             context.insert(exercise); context.insert(revision); try context.save()
             XCTAssertFalse(context.hasChanges)
 
-            var entry = WorkoutEntryDraft(exercise: exercise)
+            var entry = try WorkoutCreationV2.makeEntryDraft(for: exercise, in: context)
             entry.sets[0].values[metric.id] = "1"
             guard case let .success(entries) = WorkoutSetDraftEditing.validatedEntries([entry]) else { return XCTFail("入力を検証できる") }
             XCTAssertThrowsError(try WorkoutCreationV2.save(day: .now, entries: entries, in: context), "新規Workout: \(mismatch)") { error in
@@ -283,14 +283,64 @@ final class MeleteTests: XCTestCase {
             let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 4, values: [MetricValue(metric: metric, scaledValue: 1)])])
             let workout = Workout(day: .now, records: [record])
             context.insert(workout); try context.save()
-            let addition = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
-            XCTAssertThrowsError(try WorkoutValueEditingV2.save([], additions: [addition], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context), "既存Workout追加: \(mismatch)") { error in
-                guard case MetricValueRevisionLinkingError.snapshotMismatch = error else { return XCTFail("snapshot不一致の明示エラーが必要: \(error)") }
+            let originalValues = record.sets.flatMap(\.values).map { ($0.id, $0.scaledValue) }
+            let originalLinks = try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.id)
+
+            // まず破損履歴をそのまま使い、draft生成時の早期拒否を確認する。
+            XCTAssertThrowsError(try WorkoutValueEditingV2.appendSetDraft(for: record, exercise: exercise, in: context), "破損履歴からのdraft生成: \(mismatch)") { error in
+                guard case MetricValueRevisionLinkingError.snapshotMismatch = error else { return XCTFail("draft生成時はsnapshotMismatchが必要: \(error)") }
             }
             XCTAssertEqual(record.sets.map(\.sortOrder), [4])
-            XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
+            XCTAssertEqual(record.sets.flatMap(\.values).map { $0.id }, originalValues.map { $0.0 })
+            XCTAssertEqual(record.sets.flatMap(\.values).map(\.scaledValue), originalValues.map(\.1))
+            XCTAssertEqual(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.id), originalLinks)
             XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [revision.id])
-            XCTAssertFalse(context.hasChanges, "拒否時に追加値・revision/linkを残さない")
+            XCTAssertFalse(context.hasChanges, "draft生成拒否時に変更を残さない")
+
+            // 同じcontext内でsnapshotを一時的に正常化し、有効なdraftを作ってから再度破損させる。
+            switch mismatch {
+            case "metric-name": metric.name = "重量"
+            case "metric-unit": metric.unit = "kg"
+            case "metric-decimal": metric.allowsDecimal = true
+            case "metric-required": metric.isRequired = false
+            case "revision-name": revision.name = "重量"
+            case "revision-unit": revision.unit = "kg"
+            case "revision-decimal": revision.allowsDecimal = true
+            case "revision-required": revision.isRequired = false
+            default: break
+            }
+            try context.save()
+            XCTAssertFalse(context.hasChanges)
+            let addition = try XCTUnwrap(WorkoutValueEditingV2.appendSetDraft(for: record, exercise: exercise, in: context))
+            let corruptionContext = ModelContext(context.container)
+            switch mismatch {
+            case "metric-name": try XCTUnwrap(corruptionContext.fetch(FetchDescriptor<MetricDefinition>()).first { $0.id == metric.id }).name = "metric不一致"
+            case "metric-unit": try XCTUnwrap(corruptionContext.fetch(FetchDescriptor<MetricDefinition>()).first { $0.id == metric.id }).unit = "lb"
+            case "metric-decimal": try XCTUnwrap(corruptionContext.fetch(FetchDescriptor<MetricDefinition>()).first { $0.id == metric.id }).allowsDecimal = false
+            case "metric-required": try XCTUnwrap(corruptionContext.fetch(FetchDescriptor<MetricDefinition>()).first { $0.id == metric.id }).isRequired = true
+            case "revision-name": try XCTUnwrap(corruptionContext.fetch(FetchDescriptor<MetricDefinitionRevision>()).first { $0.id == revision.id }).name = "revision不一致"
+            case "revision-unit": try XCTUnwrap(corruptionContext.fetch(FetchDescriptor<MetricDefinitionRevision>()).first { $0.id == revision.id }).unit = "lb"
+            case "revision-decimal": try XCTUnwrap(corruptionContext.fetch(FetchDescriptor<MetricDefinitionRevision>()).first { $0.id == revision.id }).allowsDecimal = false
+            case "revision-required": try XCTUnwrap(corruptionContext.fetch(FetchDescriptor<MetricDefinitionRevision>()).first { $0.id == revision.id }).isRequired = true
+            default: break
+            }
+            try corruptionContext.save()
+            XCTAssertFalse(context.hasChanges)
+            XCTAssertThrowsError(try WorkoutValueEditingV2.save([], additions: [addition], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context), "既存Workout追加: \(mismatch)") { error in
+                switch mismatch {
+                case "metric-name", "metric-unit", "metric-decimal", "metric-required":
+                    guard case WorkoutValueEditError.metricsChanged = error else { return XCTFail("定義変更にはmetricsChangedが必要: \(error)") }
+                case "revision-name", "revision-unit", "revision-decimal", "revision-required":
+                    guard case MetricValueRevisionLinkingError.snapshotMismatch = error else { return XCTFail("revision変更にはsnapshotMismatchが必要: \(error)") }
+                default: XCTFail("未知のmismatch: \(mismatch)")
+                }
+            }
+            XCTAssertEqual(record.sets.map(\.sortOrder), [4])
+            XCTAssertEqual(record.sets.flatMap(\.values).map { $0.id }, originalValues.map { $0.0 })
+            XCTAssertEqual(record.sets.flatMap(\.values).map(\.scaledValue), originalValues.map(\.1))
+            XCTAssertEqual(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.id), originalLinks)
+            XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [revision.id])
+            XCTAssertFalse(context.hasChanges, "save拒否時に追加値・revision/linkを残さない")
         }
     }
 
@@ -323,7 +373,7 @@ final class MeleteTests: XCTestCase {
             let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 2, values: [value])])
             let workout = Workout(day: .now, records: [record])
             context.insert(exercise); context.insert(workout); try context.save()
-            let draft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+            let draft = try XCTUnwrap(WorkoutValueEditingV2.appendSetDraft(for: record, exercise: exercise, in: context))
             var changedDraft = draft
             changedDraft.values[metric.id] = "20"
             switch rejection {
@@ -344,7 +394,7 @@ final class MeleteTests: XCTestCase {
         let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [MetricValue(metric: metric, scaledValue: 1)])])
         let workout = Workout(day: .now, records: [record])
         context.insert(exercise); context.insert(workout); try context.save()
-        let draft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+        let draft = try XCTUnwrap(WorkoutValueEditingV2.appendSetDraft(for: record, exercise: exercise, in: context))
         metric.name = "未保存変更"
         XCTAssertThrowsError(try WorkoutValueEditingV2.save([], additions: [draft], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context))
         XCTAssertTrue(context.hasChanges, "拒否時に呼び出し元のdirty contextをsave/rollbackしない")
@@ -367,12 +417,14 @@ final class MeleteTests: XCTestCase {
         let revision = MetricDefinitionRevision(metricID: metric.id, revision: 2, name: "重量", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
         context.insert(exercise); context.insert(workout); context.insert(other); context.insert(revision); try context.save()
         XCTAssertFalse(context.hasChanges, "注入失敗を試す前はcontextがclean")
-        let draft = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise))
+        let draft = try XCTUnwrap(WorkoutValueEditingV2.appendSetDraft(for: record, exercise: exercise, in: context))
         var filled = draft
         filled.values[metric.id] = "10"
         let oldDay = workout.day
         let oldLegacyValue = legacy.scaledValue
-        XCTAssertThrowsError(try WorkoutValueEditingV2.save([], additions: [filled], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context) { _ in throw InjectedMigrationFailure.expected })
+        XCTAssertThrowsError(try WorkoutValueEditingV2.save([], additions: [filled], day: try XCTUnwrap(WorkoutValueEditing.date(from: workout.day)), to: workout, exercises: [exercise], in: context) { _ in throw InjectedMigrationFailure.expected }) { error in
+            guard case InjectedMigrationFailure.expected = error else { return XCTFail("注入したエラー値が伝播する必要: \(error)") }
+        }
         XCTAssertEqual(workout.day, oldDay)
         XCTAssertEqual(record.sets.map(\.sortOrder), [4])
         XCTAssertEqual(legacy.scaledValue, oldLegacyValue)
@@ -491,13 +543,13 @@ final class MeleteTests: XCTestCase {
         context.insert(existingRevision)
         try context.save()
 
-        var entryA = WorkoutEntryDraft(exercise: exerciseA)
+        var entryA = try WorkoutCreationV2.makeEntryDraft(for: exerciseA, in: context)
         entryA.sets[0].values[metricA.id] = "0"
         entryA.sets[0].values[metricB.id] = ""
         var secondSet = WorkoutSetDraft()
         secondSet.values[metricA.id] = "2.5"
         entryA.sets.append(secondSet)
-        var entryB = WorkoutEntryDraft(exercise: exerciseB)
+        var entryB = try WorkoutCreationV2.makeEntryDraft(for: exerciseB, in: context)
         entryB.sets[0].values[metricC.id] = "3"
         guard case let .success(entries) = WorkoutSetDraftEditing.validatedEntries([entryA, entryB]) else {
             return XCTFail("合成入力の検証に成功する")
@@ -534,7 +586,7 @@ final class MeleteTests: XCTestCase {
         let exercise = Exercise(name: "合成種目", metrics: [metric])
         context.insert(exercise)
         try context.save()
-        var entry = WorkoutEntryDraft(exercise: exercise)
+        var entry = try WorkoutCreationV2.makeEntryDraft(for: exercise, in: context)
         entry.sets[0].values[metric.id] = "1"
         guard case let .success(entries) = WorkoutSetDraftEditing.validatedEntries([entry]) else { return XCTFail("入力を検証できる") }
         XCTAssertThrowsError(try WorkoutCreationV2.save(day: .now, entries: entries, in: context) { _ in throw InjectedMigrationFailure.expected })
@@ -557,9 +609,9 @@ final class MeleteTests: XCTestCase {
         context.insert(exercise)
         try context.save()
 
-        var entry = WorkoutEntryDraft(exercise: exercise)
-        entry.sets[0].values[metric.id] = "1"
-        let entries = [entry]
+        var todayEntry = try WorkoutCreationV2.makeEntryDraft(for: exercise, in: context)
+        todayEntry.sets[0].values[metric.id] = "1"
+        let todayEntries = [todayEntry]
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let fixedNow = Date.now
@@ -568,15 +620,19 @@ final class MeleteTests: XCTestCase {
         let tomorrow = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: today))
         let yesterday = try XCTUnwrap(calendar.date(byAdding: .day, value: -1, to: today))
 
-        XCTAssertThrowsError(try WorkoutCreationV2.save(day: tomorrow, entries: entries, in: context, calendar: calendar))
+        XCTAssertThrowsError(try WorkoutCreationV2.save(day: tomorrow, entries: todayEntries, in: context, calendar: calendar))
         XCTAssertFalse(context.hasChanges)
         XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).isEmpty)
         XCTAssertTrue(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).isEmpty)
         XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty)
 
-        XCTAssertNoThrow(try WorkoutCreationV2.save(day: laterToday, entries: entries, in: context, calendar: calendar))
+        XCTAssertNoThrow(try WorkoutCreationV2.save(day: laterToday, entries: todayEntries, in: context, calendar: calendar))
         try context.save()
-        XCTAssertNoThrow(try WorkoutCreationV2.save(day: yesterday, entries: entries, in: context, calendar: calendar))
+
+        var yesterdayEntry = try WorkoutCreationV2.makeEntryDraft(for: exercise, in: context)
+        yesterdayEntry.sets[0].values[metric.id] = "1"
+        let yesterdayEntries = [yesterdayEntry]
+        XCTAssertNoThrow(try WorkoutCreationV2.save(day: yesterday, entries: yesterdayEntries, in: context, calendar: calendar))
         try context.save()
         XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).count, 2)
     }
@@ -588,7 +644,7 @@ final class MeleteTests: XCTestCase {
         context.insert(exercise)
         try context.save()
 
-        var entry = WorkoutEntryDraft(exercise: exercise)
+        var entry = try WorkoutCreationV2.makeEntryDraft(for: exercise, in: context)
         entry.sets[0].values[metric.id] = "1"
         let day = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -628,7 +684,7 @@ final class MeleteTests: XCTestCase {
         context.insert(existingWorkout)
         try context.save()
 
-        var entry = WorkoutEntryDraft(exercise: exercise)
+        var entry = try WorkoutCreationV2.makeEntryDraft(for: exercise, in: context)
         entry.sets[0].values[metric.id] = "3"
         guard case let .success(entries) = WorkoutSetDraftEditing.validatedEntries([entry]) else {
             return XCTFail("合成入力の検証に成功する")
@@ -1108,7 +1164,7 @@ final class MeleteTests: XCTestCase {
                 drafts[0].isRequired = isRequired
                 try MetricDefinitionEditingV2.save(drafts, for: currentExercise, in: context)
 
-                var entry = WorkoutEntryDraft(exercise: currentExercise)
+                var entry = try WorkoutCreationV2.makeEntryDraft(for: currentExercise, in: context)
                 entry.sets[0].values[metricID] = allowsDecimal ? "8.5" : "8"
                 let generatedWorkout = try WorkoutCreationV2.save(day: .now, entries: [entry], in: context)
                 generatedValueIDs.append(try XCTUnwrap(generatedWorkout.records.first?.sets.first?.values.first?.id))
