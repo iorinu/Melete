@@ -163,6 +163,7 @@ struct MainView: View {
         } message: { Text(errorMessage ?? "") }
         .confirmationDialog("運動記録を削除しますか？", isPresented: Binding(get: { pendingWorkoutDeletion != nil }, set: { if !$0 { pendingWorkoutDeletion = nil } }), titleVisibility: .visible) {
             Button("この運動を削除", role: .destructive) { confirmWorkoutDeletion() }
+                .accessibilityIdentifier("confirmDeleteWorkout_\(pendingWorkoutDeletion?.workoutID.uuidString ?? "none")")
             Button("キャンセル", role: .cancel) { pendingWorkoutDeletion = nil }
         } message: {
             if let target = pendingWorkoutDeletion {
@@ -522,6 +523,7 @@ struct MainView: View {
             }
             Spacer()
             Button("項目を管理") { beginMetricDefinitionEditing(exercise) }
+                .accessibilityIdentifier("manageMetricDefinitions_\(exercise.id.uuidString)")
             Button("名前を編集", systemImage: "pencil") { editingExercise = exercise }
             Button(exercise.isArchived ? "復帰" : "アーカイブ") {
                 let original = exercise.isArchived

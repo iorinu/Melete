@@ -159,19 +159,28 @@ struct MetricDefinitionEditForm: View {
                         VStack(alignment: .leading, spacing: 8) {
                             if metric.original == nil || allowsExistingDefinitionEditing {
                                 TextField("項目名（例: 重量）", text: $metric.name)
+                                    .accessibilityIdentifier("metricDefinitionName_\(metric.id.uuidString)")
                                 HStack {
-                                    TextField("単位（例: kg）", text: $metric.unit).frame(maxWidth: 130)
+                                    TextField("単位（例: kg）", text: $metric.unit)
+                                        .accessibilityIdentifier("metricDefinitionUnit_\(metric.id.uuidString)")
+                                        .frame(maxWidth: 130)
                                     Picker("形式", selection: $metric.allowsDecimal) {
                                         Text("整数").tag(false)
                                         Text("小数（第3位まで）").tag(true)
-                                    }.frame(maxWidth: 200)
-                                    Toggle("必須", isOn: $metric.isRequired).toggleStyle(.checkbox)
+                                    }
+                                    .accessibilityIdentifier("metricDefinitionFormat_\(metric.id.uuidString)")
+                                    .frame(maxWidth: 200)
+                                    Toggle("必須", isOn: $metric.isRequired)
+                                        .accessibilityIdentifier("metricDefinitionRequired_\(metric.id.uuidString)")
+                                        .toggleStyle(.checkbox)
                                 }
                             } else {
                                 Text("\(metric.name)（\(metric.unit)）・\(metric.allowsDecimal ? "小数" : "整数")・\(metric.isRequired ? "必須" : "任意")")
                                     .font(.subheadline.weight(.medium))
+                                    .accessibilityIdentifier("metricDefinitionSummary_\(metric.id.uuidString)")
                             }
                             Toggle(metric.isActive ? "入力欄で使用中" : "入力欄から外しています", isOn: $metric.isActive)
+                                .accessibilityIdentifier("metricDefinitionActive_\(metric.id.uuidString)")
                                 .toggleStyle(.switch)
                         }
                         .padding(.vertical, 5)
@@ -179,6 +188,7 @@ struct MetricDefinitionEditForm: View {
                     Button("項目を追加", systemImage: "plus") {
                         metrics.append(MetricDefinitionDraft(name: "", unit: "", allowsDecimal: false, isRequired: true))
                     }
+                    .accessibilityIdentifier("addMetricDefinitionButton")
                 }
             }
             if let validationError { Text(validationError).foregroundStyle(.red) }
@@ -189,6 +199,7 @@ struct MetricDefinitionEditForm: View {
                     if let error = onSave(metrics) { validationError = error } else { dismiss() }
                 }
                 .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("saveMetricDefinitionsButton")
             }
         }
         .padding(26)
@@ -473,6 +484,7 @@ struct WorkoutValueEditForm: View {
                                     do { pendingSetDeletion = try captureSetDeletionTarget(workout, record, set) }
                                     catch { validationError = error.localizedDescription }
                                 }
+                                .accessibilityIdentifier("deleteWorkoutSet_\(set.id.uuidString)")
                                 ForEach(drafts.indices.filter { index in
                                     set.values.contains { $0.id == drafts[index].valueID }
                                 }, id: \.self) { index in
@@ -503,6 +515,7 @@ struct WorkoutValueEditForm: View {
                                             .frame(maxWidth: .infinity, alignment: .leading)
                                         TextField(metric.allowsDecimal ? "小数第3位まで" : "0以上の整数", text: additionBinding(draftID: addition.id, metric: metric))
                                             .frame(minWidth: 100, maxWidth: 180).textFieldStyle(.roundedBorder)
+                                            .accessibilityIdentifier("addedSetMetric_\(addition.id.uuidString)_\(metric.id.uuidString)")
                                     }
                                 }
                                 Button("追加を取り消す", role: .destructive) {
@@ -520,6 +533,7 @@ struct WorkoutValueEditForm: View {
                                 Button("セットを追加", systemImage: "plus") {
                                     if let draft = WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise) { additions.append(draft) }
                                 }
+                                .accessibilityIdentifier("addWorkoutSet_\(record.id.uuidString)")
                             } else {
                                 Text("有効な項目がないため、この種目にセットを追加できません。項目を復帰してから再度お試しください。")
                                     .font(.footnote).foregroundStyle(.secondary)
@@ -543,6 +557,7 @@ struct WorkoutValueEditForm: View {
         .tint(FormStyle.accent)
         .confirmationDialog("セットを削除しますか？", isPresented: Binding(get: { pendingSetDeletion != nil }, set: { if !$0 { pendingSetDeletion = nil } }), titleVisibility: .visible) {
             Button("このセットを削除", role: .destructive) { confirmSetDeletion() }
+                .accessibilityIdentifier("confirmDeleteWorkoutSet_\(pendingSetDeletion?.setID.uuidString ?? "none")")
             Button("キャンセル", role: .cancel) { pendingSetDeletion = nil }
         } message: {
             if let target = pendingSetDeletion {
@@ -553,6 +568,7 @@ struct WorkoutValueEditForm: View {
         }
         .confirmationDialog("種目記録を削除しますか？", isPresented: Binding(get: { pendingRecordDeletion != nil }, set: { if !$0 { pendingRecordDeletion = nil } }), titleVisibility: .visible) {
             Button("この種目記録を削除", role: .destructive) { confirmRecordDeletion() }
+                .accessibilityIdentifier("confirmDeleteWorkoutRecord_\(pendingRecordDeletion?.record.id.uuidString ?? "none")")
             Button("キャンセル", role: .cancel) { pendingRecordDeletion = nil }
         } message: {
             if let target = pendingRecordDeletion {
