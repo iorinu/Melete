@@ -610,6 +610,111 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         XCTAssertEqual(existing.exercise.metrics.map(\.id), [existing.metric.id])
     }
 
+    func testDuplicateExistingDraftIDIsRejectedWithoutChangingDefinitionsValuesOrLinks() throws {
+        let fixture = try makeFixture()
+        let revision = try XCTUnwrap(try fixture.context.fetch(FetchDescriptor<MetricDefinitionRevision>()).first)
+        let value = MetricValue(metric: fixture.metric, scaledValue: 27_500)
+        fixture.context.insert(value)
+        try fixture.context.save()
+        let link = MetricValueRevisionLink(valueID: value.id, revisionID: revision.id)
+        fixture.context.insert(link)
+        try fixture.context.save()
+
+        let metricBefore = MetricDefinitionSnapshot(fixture.metric)
+        let valueBefore = WorkoutValueSnapshot(value)
+        let revisionBefore = (revision.id, revision.seriesID, revision.revision, revision.name, revision.unit)
+        let linkBefore = (link.id, link.valueID, link.revisionID)
+        let drafts = [MetricDefinitionDraft(existing: fixture.metric), MetricDefinitionDraft(existing: fixture.metric)]
+        var changedDrafts = drafts
+        changedDrafts[0].name = "変更案"
+
+        XCTAssertThrowsError(try MetricDefinitionEditingV2.save(changedDrafts, for: fixture.exercise, in: fixture.context)) { error in
+            guard case MetricDefinitionEditingV2Error.changed = error else { return XCTFail("changed型が必要: \(error)") }
+        }
+        XCTAssertFalse(fixture.context.hasChanges)
+        XCTAssertEqual(MetricDefinitionSnapshot(fixture.metric), metricBefore)
+        XCTAssertEqual(WorkoutValueSnapshot(value), valueBefore)
+        let revisionsAfter = try fixture.context.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        XCTAssertEqual(revisionsAfter.map(\.id), [revisionBefore.0])
+        XCTAssertEqual(revisionsAfter.first?.seriesID, revisionBefore.1)
+        XCTAssertEqual(revisionsAfter.first?.revision, revisionBefore.2)
+        XCTAssertEqual(revisionsAfter.first?.name, revisionBefore.3)
+        XCTAssertEqual(revisionsAfter.first?.unit, revisionBefore.4)
+        let linksAfter = try fixture.context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(linksAfter.map(\.id), [linkBefore.0])
+        XCTAssertEqual(linksAfter.first?.valueID, linkBefore.1)
+        XCTAssertEqual(linksAfter.first?.revisionID, linkBefore.2)
+
+        let reopened = ModelContext(fixture.container)
+        let savedExercise = try XCTUnwrap(try reopened.fetch(FetchDescriptor<Exercise>()).first { $0.id == fixture.exercise.id })
+        XCTAssertEqual(savedExercise.metrics.map(MetricDefinitionSnapshot.init), [metricBefore])
+        XCTAssertEqual(WorkoutValueSnapshot(try XCTUnwrap(try reopened.fetch(FetchDescriptor<MetricValue>()).first { $0.id == value.id })), valueBefore)
+        let reopenedRevisions = try reopened.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        XCTAssertEqual(reopenedRevisions.map(\.id), [revisionBefore.0])
+        XCTAssertEqual(reopenedRevisions.first?.seriesID, revisionBefore.1)
+        XCTAssertEqual(reopenedRevisions.first?.revision, revisionBefore.2)
+        XCTAssertEqual(reopenedRevisions.first?.name, revisionBefore.3)
+        XCTAssertEqual(reopenedRevisions.first?.unit, revisionBefore.4)
+        let reopenedLinks = try reopened.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(reopenedLinks.map(\.id), [linkBefore.0])
+        XCTAssertEqual(reopenedLinks.first?.valueID, linkBefore.1)
+        XCTAssertEqual(reopenedLinks.first?.revisionID, linkBefore.2)
+    }
+
+    func testDuplicateStoredMetricIDsAreRejectedWithoutChangingDefinitionsValuesOrLinks() throws {
+        let fixture = try makeFixture()
+        let revision = try XCTUnwrap(try fixture.context.fetch(FetchDescriptor<MetricDefinitionRevision>()).first)
+        let value = MetricValue(metric: fixture.metric, scaledValue: 41_000)
+        fixture.context.insert(value)
+        try fixture.context.save()
+        let link = MetricValueRevisionLink(valueID: value.id, revisionID: revision.id)
+        fixture.context.insert(link)
+        try fixture.context.save()
+
+        let duplicateMetric = MetricDefinition(name: "別定義", unit: "回", allowsDecimal: false, isRequired: true, sortOrder: 1)
+        duplicateMetric.id = fixture.metric.id
+        fixture.exercise.metrics.append(duplicateMetric)
+        try fixture.context.save()
+        let metricsBefore = fixture.exercise.metrics.map(MetricDefinitionSnapshot.init).sorted { $0.sortOrder < $1.sortOrder }
+        let valueBefore = WorkoutValueSnapshot(value)
+        let revisionBefore = (revision.id, revision.seriesID, revision.revision, revision.name, revision.unit)
+        let linkBefore = (link.id, link.valueID, link.revisionID)
+        var drafts = MetricDefinitionEditing.draft(for: fixture.exercise)
+        drafts[0].unit = "lb"
+
+        XCTAssertThrowsError(try MetricDefinitionEditingV2.save(drafts, for: fixture.exercise, in: fixture.context)) { error in
+            guard case MetricDefinitionEditingV2Error.changed = error else { return XCTFail("changed型が必要: \(error)") }
+        }
+        XCTAssertFalse(fixture.context.hasChanges)
+        XCTAssertEqual(fixture.exercise.metrics.map(MetricDefinitionSnapshot.init).sorted { $0.sortOrder < $1.sortOrder }, metricsBefore)
+        XCTAssertEqual(WorkoutValueSnapshot(value), valueBefore)
+        let revisionsAfter = try fixture.context.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        XCTAssertEqual(revisionsAfter.map(\.id), [revisionBefore.0])
+        XCTAssertEqual(revisionsAfter.first?.seriesID, revisionBefore.1)
+        XCTAssertEqual(revisionsAfter.first?.revision, revisionBefore.2)
+        XCTAssertEqual(revisionsAfter.first?.name, revisionBefore.3)
+        XCTAssertEqual(revisionsAfter.first?.unit, revisionBefore.4)
+        let linksAfter = try fixture.context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(linksAfter.map(\.id), [linkBefore.0])
+        XCTAssertEqual(linksAfter.first?.valueID, linkBefore.1)
+        XCTAssertEqual(linksAfter.first?.revisionID, linkBefore.2)
+
+        let reopened = ModelContext(fixture.container)
+        let savedExercise = try XCTUnwrap(try reopened.fetch(FetchDescriptor<Exercise>()).first { $0.id == fixture.exercise.id })
+        XCTAssertEqual(savedExercise.metrics.map(MetricDefinitionSnapshot.init).sorted { $0.sortOrder < $1.sortOrder }, metricsBefore)
+        XCTAssertEqual(WorkoutValueSnapshot(try XCTUnwrap(try reopened.fetch(FetchDescriptor<MetricValue>()).first { $0.id == value.id })), valueBefore)
+        let reopenedRevisions = try reopened.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        XCTAssertEqual(reopenedRevisions.map(\.id), [revisionBefore.0])
+        XCTAssertEqual(reopenedRevisions.first?.seriesID, revisionBefore.1)
+        XCTAssertEqual(reopenedRevisions.first?.revision, revisionBefore.2)
+        XCTAssertEqual(reopenedRevisions.first?.name, revisionBefore.3)
+        XCTAssertEqual(reopenedRevisions.first?.unit, revisionBefore.4)
+        let reopenedLinks = try reopened.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(reopenedLinks.map(\.id), [linkBefore.0])
+        XCTAssertEqual(reopenedLinks.first?.valueID, linkBefore.1)
+        XCTAssertEqual(reopenedLinks.first?.revisionID, linkBefore.2)
+    }
+
     func testProductionV2MigrationPreservesMultiWorkoutLegacyMetricSnapshotsAfterReopen() throws {
         let storeURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("MeleteMetricDefinitionEditingV2Migration-\(UUID().uuidString).sqlite")
