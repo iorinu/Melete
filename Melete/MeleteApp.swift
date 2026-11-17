@@ -13,19 +13,20 @@ struct MeleteApp: App {
     init() {
         do {
             let arguments = ProcessInfo.processInfo.arguments
-            let hasUIStoreArgument = arguments.contains("--melete-ui-test-store")
-            let requestsV2 = arguments.contains("--melete-v2-experimental")
+#if DEBUG
+            let isolatedStoreURL = Self.isolatedStoreURLFromLaunchArguments(arguments: arguments)
+            let route = StartupRouteSelection.select(arguments: arguments, isDebug: true, isolationIsValid: isolatedStoreURL != nil)
+#else
+            let route = StartupRouteSelection.select(arguments: arguments, isDebug: false, isolationIsValid: false)
+#endif
             let configuration: ModelConfiguration
             var usingIsolatedStore = false
             var selectedMode: MainView.StoreMode = .v1
+            guard route != .error else { throw StartupError.invalidUITestStore }
 #if DEBUG
-            if hasUIStoreArgument {
-                guard let isolatedStoreURL = Self.isolatedStoreURLFromLaunchArguments() else {
-                    throw StartupError.invalidUITestStore
-                }
-                let useV2 = StoreModeSelection.experimentalV2Enabled(arguments: arguments, isDebug: true, isolatedStoreIsValid: true)
-                guard !requestsV2 || useV2 else { throw StartupError.invalidUITestStore }
-                if useV2 {
+            if route == .isolatedV1 || route == .isolatedV2 {
+                guard let isolatedStoreURL else { throw StartupError.invalidUITestStore }
+                if route == .isolatedV2 {
                     let schema = Schema(versionedSchema: MeleteSchemaV2.self)
                     configuration = ModelConfiguration("MeleteUITestV2", schema: schema, url: isolatedStoreURL, cloudKitDatabase: .none)
                     container = try ModelContainer(for: schema, migrationPlan: MeleteMigrationPlan.self, configurations: [configuration])
@@ -41,13 +42,11 @@ struct MeleteApp: App {
                         || NSClassFromString("XCTestCase") != nil {
                 throw StartupError.invalidUITestStore
             } else {
-                guard !requestsV2 else { throw StartupError.invalidUITestStore }
                 let schema = Schema(versionedSchema: MeleteSchemaV1.self)
                 configuration = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
                 container = try ModelContainer(for: schema, configurations: [configuration])
             }
 #else
-            guard !requestsV2 else { throw StartupError.invalidUITestStore }
             let schema = Schema(versionedSchema: MeleteSchemaV1.self)
             configuration = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
             container = try ModelContainer(for: schema, configurations: [configuration])
@@ -64,8 +63,9 @@ struct MeleteApp: App {
     }
 
 #if DEBUG
-    private static func isolatedStoreURLFromLaunchArguments() -> URL? {
-        UITestStoreIsolation.storeURL(arguments: ProcessInfo.processInfo.arguments)
+    private static func isolatedStoreURLFromLaunchArguments(arguments: [String]) -> URL? {
+        guard arguments.contains("--melete-ui-test-root") || arguments.contains("--melete-ui-test-store") || arguments.contains("--melete-v2-experimental") else { return nil }
+        return UITestStoreIsolation.storeURL(arguments: arguments)
     }
 #endif
 
@@ -146,14 +146,6 @@ private struct WindowTransparencyConfigurator: NSViewRepresentable {
 }
 
 #if DEBUG
-enum StoreModeSelection {
-    static func experimentalV2Enabled(arguments: [String], isDebug: Bool, isolatedStoreIsValid: Bool) -> Bool {
-        isDebug && isolatedStoreIsValid && arguments.filter { $0 == "--melete-v2-experimental" }.count == 1
-            && arguments.filter { $0 == "--melete-ui-test-store" }.count == 1
-            && arguments.filter { $0 == "--melete-ui-test-root" }.count == 1
-    }
-}
-
 enum UITestStoreIsolation {
     static let rootMarker = ".melete-ui-test-root"
     static let storeMarker = ".melete-ui-test-store"

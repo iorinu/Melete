@@ -15,6 +15,8 @@
 		68033C0AF5E93C4C62A53916 /* WorkoutFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50DC90FD8B6B2A3473447A69 /* WorkoutFlowUITests.swift */; };
 		7B220F4FE0B9311111D73B58 /* Forms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D01079DB1973F4AB20BAA97 /* Forms.swift */; };
 		8C55961FFE80344C2353CF9C /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 259144994B35EF35E28C6AC1 /* Models.swift */; };
+		91831BAFFAFA584D6E9DCABA /* StartupRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = B63DFF5A9FDE17D429352999 /* StartupRoute.swift */; };
+		96B9A241D0F3EEB232A1AA72 /* StartupRouteSelectionSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 308D14CB80589606A1C4924A /* StartupRouteSelectionSafetyTests.swift */; };
 		A1023825BD5F534FADFEBD85 /* WindowProbeSmokeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D23831650E229F7C011CEF8 /* WindowProbeSmokeUITests.swift */; };
 		DC33B7EFF60C51528CEBF876 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */; };
 /* End PBXBuildFile section */
@@ -40,6 +42,7 @@
 		060EE2CD5220532F134E4EEA /* MeleteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeleteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1D01079DB1973F4AB20BAA97 /* Forms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Forms.swift; sourceTree = "<group>"; };
 		259144994B35EF35E28C6AC1 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		308D14CB80589606A1C4924A /* StartupRouteSelectionSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRouteSelectionSafetyTests.swift; sourceTree = "<group>"; };
 		3423B998A6D0437720F26F51 /* MeleteUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeleteUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3D23831650E229F7C011CEF8 /* WindowProbeSmokeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowProbeSmokeUITests.swift; sourceTree = "<group>"; };
 		45D9505953694C4931C727E0 /* MetricInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricInput.swift; sourceTree = "<group>"; };
@@ -49,6 +52,7 @@
 		7F8B60E5F37F9AC5147FFDEB /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeleteTests.swift; sourceTree = "<group>"; };
 		9CE6F7CE1B96CFC73101F34A /* MeleteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeleteApp.swift; sourceTree = "<group>"; };
+		B63DFF5A9FDE17D429352999 /* StartupRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRoute.swift; sourceTree = "<group>"; };
 		C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDefinitionEditingV2RoundTripStaleDraftTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -59,6 +63,7 @@
 				8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */,
 				C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */,
 				5744EF0E54881543913A57EE /* MetricDefinitionEditingV2SafetyTests.swift */,
+				308D14CB80589606A1C4924A /* StartupRouteSelectionSafetyTests.swift */,
 			);
 			path = MeleteTests;
 			sourceTree = "<group>";
@@ -100,6 +105,7 @@
 				9CE6F7CE1B96CFC73101F34A /* MeleteApp.swift */,
 				45D9505953694C4931C727E0 /* MetricInput.swift */,
 				259144994B35EF35E28C6AC1 /* Models.swift */,
+				B63DFF5A9FDE17D429352999 /* StartupRoute.swift */,
 			);
 			path = Melete;
 			sourceTree = "<group>";
@@ -212,6 +218,7 @@
 				1B2D9B260F7B64EE334FE9FE /* MeleteTests.swift in Sources */,
 				DC33B7EFF60C51528CEBF876 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift in Sources */,
 				5C084228CF861D55A4CD8040 /* MetricDefinitionEditingV2SafetyTests.swift in Sources */,
+				96B9A241D0F3EEB232A1AA72 /* StartupRouteSelectionSafetyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -224,6 +231,7 @@
 				47410A4C81C03CC79E482417 /* MeleteApp.swift in Sources */,
 				5E48FF962284DB294E535545 /* MetricInput.swift in Sources */,
 				8C55961FFE80344C2353CF9C /* Models.swift in Sources */,
+				91831BAFFAFA584D6E9DCABA /* StartupRoute.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

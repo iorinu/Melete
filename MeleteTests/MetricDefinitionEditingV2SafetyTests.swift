@@ -19,17 +19,49 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         let experimentalArguments = validArguments + ["--melete-v2-experimental"]
         let isolatedURL = try XCTUnwrap(UITestStoreIsolation.storeURL(arguments: experimentalArguments))
         XCTAssertEqual(isolatedURL, storeDirectory.appendingPathComponent("Melete.store"))
-        XCTAssertTrue(StoreModeSelection.experimentalV2Enabled(arguments: experimentalArguments, isDebug: true, isolatedStoreIsValid: true))
+        let isolationIsValid = UITestStoreIsolation.storeURL(arguments: experimentalArguments) != nil
+        XCTAssertEqual(
+            StartupRouteSelection.select(arguments: experimentalArguments, isDebug: true, isolationIsValid: isolationIsValid),
+            .isolatedV2
+        )
 
-        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: ["--melete-v2-experimental"], isDebug: true, isolatedStoreIsValid: false), "V2フラグ単独では通常ストアを選択しない")
-        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: validArguments + ["--melete-v2-experimental", "--melete-v2-experimental"], isDebug: true, isolatedStoreIsValid: true), "重複フラグを拒否する")
-        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: ["--melete-ui-test-root", root.path, "--melete-v2-experimental"], isDebug: true, isolatedStoreIsValid: false), "store引数がない場合は拒否する")
-        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: ["--melete-ui-test-store", storeDirectory.path, "--melete-v2-experimental"], isDebug: true, isolatedStoreIsValid: false), "root引数がない場合は拒否する")
-        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: experimentalArguments, isDebug: false, isolatedStoreIsValid: true), "DEBUG以外では拒否する")
+        XCTAssertEqual(
+            StartupRouteSelection.select(arguments: ["--melete-v2-experimental"], isDebug: true, isolationIsValid: false),
+            .error,
+            "V2フラグ単独では通常ストアを選択しない"
+        )
+        XCTAssertEqual(
+            StartupRouteSelection.select(arguments: validArguments + ["--melete-v2-experimental", "--melete-v2-experimental"], isDebug: true, isolationIsValid: true),
+            .error,
+            "重複フラグを拒否する"
+        )
+        XCTAssertEqual(
+            StartupRouteSelection.select(arguments: ["--melete-ui-test-root", root.path, "--melete-v2-experimental"], isDebug: true, isolationIsValid: false),
+            .error,
+            "store引数がない場合は拒否する"
+        )
+        XCTAssertEqual(
+            StartupRouteSelection.select(arguments: ["--melete-ui-test-store", storeDirectory.path, "--melete-v2-experimental"], isDebug: true, isolationIsValid: false),
+            .error,
+            "root引数がない場合は拒否する"
+        )
+        XCTAssertEqual(
+            StartupRouteSelection.select(arguments: experimentalArguments, isDebug: false, isolationIsValid: true),
+            .error,
+            "DEBUG以外では拒否する"
+        )
 
         try Data("not-a-uuid".utf8).write(to: storeDirectory.appendingPathComponent(UITestStoreIsolation.storeMarker))
         XCTAssertNil(UITestStoreIsolation.storeURL(arguments: experimentalArguments))
-        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: experimentalArguments, isDebug: true, isolatedStoreIsValid: UITestStoreIsolation.storeURL(arguments: experimentalArguments) != nil), "無効markerでは通常ストアへfallbackしない")
+        XCTAssertEqual(
+            StartupRouteSelection.select(
+                arguments: experimentalArguments,
+                isDebug: true,
+                isolationIsValid: UITestStoreIsolation.storeURL(arguments: experimentalArguments) != nil
+            ),
+            .error,
+            "無効markerでは通常ストアへfallbackしない"
+        )
     }
 
     func testUITestStoreIsolationRejectsHardLinkedStoreFilesAndAcceptsRegularStore() throws {
