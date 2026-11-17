@@ -8,35 +8,57 @@ struct MeleteApp: App {
     private let container: ModelContainer?
     private let startupError: String?
     private let isolatedStoreActive: Bool
+    private let storeMode: MainView.StoreMode
 
     init() {
         do {
-            let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+            let arguments = ProcessInfo.processInfo.arguments
+            let hasUIStoreArgument = arguments.contains("--melete-ui-test-store")
+            let requestsV2 = arguments.contains("--melete-v2-experimental")
             let configuration: ModelConfiguration
             var usingIsolatedStore = false
+            var selectedMode: MainView.StoreMode = .v1
 #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("--melete-ui-test-store") {
+            if hasUIStoreArgument {
                 guard let isolatedStoreURL = Self.isolatedStoreURLFromLaunchArguments() else {
                     throw StartupError.invalidUITestStore
                 }
-                configuration = ModelConfiguration("MeleteUITest", schema: schema, url: isolatedStoreURL, cloudKitDatabase: .none)
+                let useV2 = StoreModeSelection.experimentalV2Enabled(arguments: arguments, isDebug: true, isolatedStoreIsValid: true)
+                guard !requestsV2 || useV2 else { throw StartupError.invalidUITestStore }
+                if useV2 {
+                    let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+                    configuration = ModelConfiguration("MeleteUITestV2", schema: schema, url: isolatedStoreURL, cloudKitDatabase: .none)
+                    container = try ModelContainer(for: schema, migrationPlan: MeleteMigrationPlan.self, configurations: [configuration])
+                    selectedMode = .isolatedV2Experimental
+                } else {
+                    let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+                    configuration = ModelConfiguration("MeleteUITest", schema: schema, url: isolatedStoreURL, cloudKitDatabase: .none)
+                    container = try ModelContainer(for: schema, configurations: [configuration])
+                }
                 usingIsolatedStore = true
             } else if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
                         || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
                         || NSClassFromString("XCTestCase") != nil {
                 throw StartupError.invalidUITestStore
             } else {
+                guard !requestsV2 else { throw StartupError.invalidUITestStore }
+                let schema = Schema(versionedSchema: MeleteSchemaV1.self)
                 configuration = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
+                container = try ModelContainer(for: schema, configurations: [configuration])
             }
 #else
+            guard !requestsV2 else { throw StartupError.invalidUITestStore }
+            let schema = Schema(versionedSchema: MeleteSchemaV1.self)
             configuration = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
-#endif
             container = try ModelContainer(for: schema, configurations: [configuration])
+#endif
             isolatedStoreActive = usingIsolatedStore
+            storeMode = selectedMode
             startupError = nil
         } catch {
             container = nil
             isolatedStoreActive = false
+            storeMode = .v1
             startupError = error.localizedDescription
         }
     }
@@ -65,8 +87,15 @@ struct MeleteApp: App {
                                 .accessibilityIdentifier("melete-isolated-store-active")
                                 .padding(6)
                         }
+                        if storeMode == .isolatedV2Experimental {
+                            Text("V2検証用")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("melete-experimental-v2-active")
+                                .padding(4)
+                        }
 #endif
-                        MainView().modelContainer(container)
+                        MainView(storeMode: storeMode).modelContainer(container)
                     }
                 } else {
                     ContentUnavailableView("データを開けませんでした", systemImage: "externaldrive.badge.exclamationmark", description: Text("データは初期化されていません。アプリを終了して再度起動してください。\n\(startupError ?? "")"))
@@ -117,6 +146,14 @@ private struct WindowTransparencyConfigurator: NSViewRepresentable {
 }
 
 #if DEBUG
+enum StoreModeSelection {
+    static func experimentalV2Enabled(arguments: [String], isDebug: Bool, isolatedStoreIsValid: Bool) -> Bool {
+        isDebug && isolatedStoreIsValid && arguments.filter { $0 == "--melete-v2-experimental" }.count == 1
+            && arguments.filter { $0 == "--melete-ui-test-store" }.count == 1
+            && arguments.filter { $0 == "--melete-ui-test-root" }.count == 1
+    }
+}
+
 enum UITestStoreIsolation {
     static let rootMarker = ".melete-ui-test-root"
     static let storeMarker = ".melete-ui-test-store"
@@ -129,6 +166,7 @@ enum UITestStoreIsolation {
         let manager = FileManager.default
         let root = URL(fileURLWithPath: arguments[rootIndex + 1], isDirectory: true).standardizedFileURL
         let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
+        let temporaryRoot = manager.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL
         let directory = URL(fileURLWithPath: arguments[index + 1], isDirectory: true).standardizedFileURL
         let resolvedDirectory = directory.resolvingSymlinksInPath().standardizedFileURL
         let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
@@ -150,6 +188,8 @@ enum UITestStoreIsolation {
         let rootMarkerIsRegular = (try? manager.attributesOfItem(atPath: rootMarkerURL.path)[.type] as? FileAttributeType) == .some(.typeRegular)
         let storeMarkerIsRegular = (try? manager.attributesOfItem(atPath: storeMarkerURL.path)[.type] as? FileAttributeType) == .some(.typeRegular)
         guard resolvedRoot == root,
+              resolvedRoot != temporaryRoot,
+              resolvedRoot.path.hasPrefix(temporaryRoot.path.hasSuffix("/") ? temporaryRoot.path : temporaryRoot.path + "/"),
               resolvedDirectory == expectedResolvedDirectory,
               rootOwner == getuid(),
               rootPermissions == 0o700,
@@ -160,8 +200,10 @@ enum UITestStoreIsolation {
               directoryIsDirectory,
               storeMarkerIsNotSymlink,
               rootMarkerIsRegular,
+              hasSingleHardLink(at: rootMarkerURL, manager: manager),
               (try? String(contentsOf: rootMarkerURL, encoding: .utf8)) == "Melete UI test root v1",
               storeMarkerIsRegular,
+              hasSingleHardLink(at: storeMarkerURL, manager: manager),
               let marker = try? String(contentsOf: storeMarkerURL, encoding: .utf8),
               UUID(uuidString: marker) != nil,
               let contents = try? manager.contentsOfDirectory(atPath: directory.path),
@@ -177,10 +219,21 @@ enum UITestStoreIsolation {
         for name in contents where name != storeMarker {
             let url = directory.appendingPathComponent(name)
             guard url.resolvingSymlinksInPath().standardizedFileURL == url.standardizedFileURL,
-                  let attributes = try? manager.attributesOfItem(atPath: url.path),
-                  attributes[.type] as? FileAttributeType == .typeRegular else { return false }
+                   let attributes = try? manager.attributesOfItem(atPath: url.path),
+                   attributes[.type] as? FileAttributeType == .typeRegular,
+                   hasSingleHardLink(attributes) else { return false }
         }
         return true
+    }
+
+    private static func hasSingleHardLink(at url: URL, manager: FileManager) -> Bool {
+        guard let attributes = try? manager.attributesOfItem(atPath: url.path) else { return false }
+        return hasSingleHardLink(attributes)
+    }
+
+    private static func hasSingleHardLink(_ attributes: [FileAttributeKey: Any]) -> Bool {
+        guard let count = attributes[.referenceCount] as? NSNumber else { return false }
+        return count.uint64Value == 1
     }
 }
 #endif

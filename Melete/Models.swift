@@ -369,14 +369,12 @@ enum MetricDefinitionEditingError: LocalizedError {
 }
 
 enum MetricDefinitionEditingV2Error: LocalizedError {
-    case notImplemented
     case unsavedContext
     case changed
     case revisionOverflow
 
     var errorDescription: String? {
         switch self {
-        case .notImplemented: "V2の既存項目定義編集は未実装です。"
         case .unsavedContext: "未保存の変更があるため、項目定義を編集できません。"
         case .changed: "項目定義が別の画面で変更されたか、V2未対応の変更が含まれています。画面を開き直してください。"
         case .revisionOverflow: "項目改定番号の上限に達したため、保存できません。"
@@ -1093,6 +1091,39 @@ enum MeleteMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] { [MeleteSchemaV1.self, MeleteSchemaV2.self] }
     static var stages: [MigrationStage] {
         [MigrationStage.lightweight(fromVersion: MeleteSchemaV1.self, toVersion: MeleteSchemaV2.self)]
+    }
+}
+
+// V2の既存書き込み境界へ委譲し、アプリ側の書き込み経路を集約する。
+@MainActor final class WorkoutWritingServiceV2 {
+    private let context: ModelContext
+
+    init(context: ModelContext) {
+        self.context = context
+    }
+
+    func saveMetricDefinitions(_ drafts: [MetricDefinitionDraft], for exercise: Exercise) throws {
+        try MetricDefinitionEditingV2.save(drafts, for: exercise, in: context)
+    }
+
+    func createWorkout(day: Date, entries: [WorkoutEntryDraft], calendar: Calendar = .current) throws -> Workout {
+        try WorkoutCreationV2.save(day: day, entries: entries, in: context, calendar: calendar)
+    }
+
+    func saveWorkoutEdits(_ drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft], day: Date, to workout: Workout, exercises: [Exercise], calendar: Calendar = .current, now: Date = .now) throws {
+        try WorkoutValueEditingV2.save(drafts, additions: additions, day: day, to: workout, exercises: exercises, in: context, calendar: calendar, now: now)
+    }
+
+    func deleteSet(_ target: WorkoutSetDeletionTarget) throws {
+        try WorkoutDeletionV2.deleteSet(target, in: context)
+    }
+
+    func deleteRecord(_ target: WorkoutRecordDeletionTarget) throws {
+        try WorkoutDeletionV2.deleteRecord(target, in: context)
+    }
+
+    func deleteWorkout(id: UUID) throws {
+        try WorkoutDeletionV2.delete(workoutID: id, in: context)
     }
 }
 

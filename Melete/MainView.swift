@@ -61,6 +61,8 @@ enum WorkoutCalendarLogic {
 }
 
 struct MainView: View {
+    enum StoreMode: Equatable { case v1, isolatedV2Experimental }
+    let storeMode: StoreMode
     @Environment(\.modelContext) private var context
     @Query(sort: \Exercise.name) private var exercises: [Exercise]
     @Query(sort: \Workout.day, order: .reverse) private var workouts: [Workout]
@@ -75,6 +77,8 @@ struct MainView: View {
     @State private var errorMessage: String?
     @State private var displayedMonth = Calendar(identifier: .gregorian).dateInterval(of: .month, for: .now)?.start ?? .now
     @State private var selectedWorkoutDay: String?
+
+    init(storeMode: StoreMode = .v1) { self.storeMode = storeMode }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -128,7 +132,7 @@ struct MainView: View {
             ExerciseNameEditForm(exercise: exercise) { name in saveExerciseName(name, for: exercise) }
         }
         .sheet(item: $editingMetricExercise) { exercise in
-            MetricDefinitionEditForm(exercise: exercise) { drafts in saveMetricDefinitions(drafts, for: exercise) }
+            MetricDefinitionEditForm(exercise: exercise, allowsExistingDefinitionEditing: storeMode == .isolatedV2Experimental) { drafts in saveMetricDefinitions(drafts, for: exercise) }
         }
         .sheet(isPresented: $showingWorkoutForm) {
             WorkoutForm(
@@ -550,7 +554,11 @@ struct MainView: View {
 
     private func saveMetricDefinitions(_ drafts: [MetricDefinitionDraft], for exercise: Exercise) -> String? {
         do {
-            try MetricDefinitionEditing.save(drafts, for: exercise, insert: { context.insert($0) }, discard: { context.delete($0) }) { try context.save() }
+            if storeMode == .isolatedV2Experimental {
+                try WorkoutWritingServiceV2(context: context).saveMetricDefinitions(drafts, for: exercise)
+            } else {
+                try MetricDefinitionEditing.save(drafts, for: exercise, insert: { context.insert($0) }, discard: { context.delete($0) }) { try context.save() }
+            }
             return nil
         } catch {
             return error.localizedDescription
@@ -558,6 +566,10 @@ struct MainView: View {
     }
 
     private func saveWorkout(day: Date, entries: [WorkoutEntryDraft]) -> Bool {
+        if storeMode == .isolatedV2Experimental {
+            do { try WorkoutWritingServiceV2(context: context).createWorkout(day: day, entries: entries); return true }
+            catch { errorMessage = error.localizedDescription; return false }
+        }
         let workout = Workout(day: day, records: Self.workoutRecords(from: entries))
         context.insert(workout)
         do { try context.save(); return true }
@@ -578,7 +590,11 @@ struct MainView: View {
 
     private func saveWorkoutEdits(workout: Workout, day: Date, drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft]) -> String? {
         do {
-            try WorkoutValueEditing.save(drafts, additions: additions, day: day, to: workout, exercises: exercises, discard: { context.delete($0) }) { try context.save() }
+            if storeMode == .isolatedV2Experimental {
+                try WorkoutWritingServiceV2(context: context).saveWorkoutEdits(drafts, additions: additions, day: day, to: workout, exercises: exercises)
+            } else {
+                try WorkoutValueEditing.save(drafts, additions: additions, day: day, to: workout, exercises: exercises, discard: { context.delete($0) }) { try context.save() }
+            }
             return nil
         } catch {
             return error.localizedDescription
@@ -588,7 +604,8 @@ struct MainView: View {
     private func deleteWorkoutSet(_ target: WorkoutSetDeletionTarget) -> String? {
         guard !context.hasChanges else { return WorkoutSetDeletionError.unsavedContext.localizedDescription }
         do {
-            try WorkoutSetDeletion.delete(target, in: context) { try context.save() }
+            if storeMode == .isolatedV2Experimental { try WorkoutWritingServiceV2(context: context).deleteSet(target) }
+            else { try WorkoutSetDeletion.delete(target, in: context) { try context.save() } }
             return nil
         } catch {
             return error.localizedDescription
@@ -598,7 +615,8 @@ struct MainView: View {
     private func deleteWorkoutRecord(_ target: WorkoutRecordDeletionTarget) -> String? {
         guard !context.hasChanges else { return WorkoutSetDeletionError.unsavedContext.localizedDescription }
         do {
-            try WorkoutRecordDeletion.delete(target, in: context) { try context.save() }
+            if storeMode == .isolatedV2Experimental { try WorkoutWritingServiceV2(context: context).deleteRecord(target) }
+            else { try WorkoutRecordDeletion.delete(target, in: context) { try context.save() } }
             return nil
         } catch {
             return error.localizedDescription
@@ -610,7 +628,8 @@ struct MainView: View {
         let workoutID = workout.id
         pendingWorkoutDeletion = nil
         do {
-            try WorkoutDeletion.delete(workoutID: workoutID, in: context)
+            if storeMode == .isolatedV2Experimental { try WorkoutWritingServiceV2(context: context).deleteWorkout(id: workoutID) }
+            else { try WorkoutDeletion.delete(workoutID: workoutID, in: context) }
         } catch {
             errorMessage = error.localizedDescription
         }

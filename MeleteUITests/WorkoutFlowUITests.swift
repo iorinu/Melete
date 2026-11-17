@@ -200,3 +200,114 @@ private extension XCUIElement {
         typeText(value)
     }
 }
+
+final class IsolatedV2SmokeUITests: XCTestCase {
+    private var testRoot: URL!
+    private var storeDirectory: URL!
+    private var storeMarker: String!
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        let manager = FileManager.default
+        testRoot = manager.temporaryDirectory
+            .appendingPathComponent("MeleteIsolatedV2-\(UUID().uuidString)", isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        try manager.createDirectory(at: testRoot, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        guard manager.createFile(
+            atPath: testRoot.appendingPathComponent(".melete-ui-test-root").path,
+            contents: Data("Melete UI test root v1".utf8),
+            attributes: [.posixPermissions: 0o600]
+        ) else { throw IsolatedV2SetupError.invalidRoot }
+
+        storeDirectory = testRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try manager.createDirectory(at: storeDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        storeMarker = UUID().uuidString
+        guard manager.createFile(
+            atPath: storeDirectory.appendingPathComponent(".melete-ui-test-store").path,
+            contents: Data(storeMarker.utf8),
+            attributes: [.posixPermissions: 0o600]
+        ) else { throw IsolatedV2SetupError.invalidStore }
+    }
+
+    func testIsolatedV2MarkersRemainValidAfterRelaunch() {
+        let app = XCUIApplication()
+        configureLaunchArguments(for: app)
+        app.launch()
+        guard verifySafeV2Launch(app, phase: "起動直後") else { return }
+        app.terminate()
+
+        configureLaunchArguments(for: app)
+        app.launch()
+        guard verifySafeV2Launch(app, phase: "再起動後") else { return }
+        app.terminate()
+    }
+
+    private func configureLaunchArguments(for app: XCUIApplication) {
+        app.launchArguments = [
+            "--melete-ui-test-root", testRoot.path,
+            "--melete-ui-test-store", storeDirectory.path,
+            "--melete-v2-experimental"
+        ]
+    }
+
+    private func verifySafeV2Launch(_ app: XCUIApplication, phase: String) -> Bool {
+        let arguments = app.launchArguments
+        guard let rootIndex = arguments.firstIndex(of: "--melete-ui-test-root"),
+              arguments.indices.contains(rootIndex + 1), arguments[rootIndex + 1] == testRoot.path,
+              arguments.filter({ $0 == "--melete-ui-test-root" }).count == 1,
+              let storeIndex = arguments.firstIndex(of: "--melete-ui-test-store"),
+              arguments.indices.contains(storeIndex + 1), arguments[storeIndex + 1] == storeDirectory.path,
+              arguments.filter({ $0 == "--melete-ui-test-store" }).count == 1,
+              arguments.filter({ $0 == "--melete-v2-experimental" }).count == 1 else {
+            XCTFail("\(phase): 必須の隔離/V2起動引数がありません。以降の操作を中断します。")
+            return false
+        }
+        guard validIsolationMarkers else {
+            XCTFail("\(phase): root/storeの所有権またはmarkerが不正です。以降の操作を中断します。")
+            return false
+        }
+        guard app.staticTexts["melete-isolated-store-active"].waitForExistence(timeout: 5),
+              app.staticTexts["melete-experimental-v2-active"].waitForExistence(timeout: 5) else {
+            XCTFail("\(phase): 隔離ストアまたはV2表示が確認できません。以降の操作を中断します。")
+            return false
+        }
+        guard validIsolationMarkers else {
+            XCTFail("\(phase): 画面確認後にroot/storeのmarker整合が失われました。以降の操作を中断します。")
+            return false
+        }
+        return true
+    }
+
+    private var validIsolationMarkers: Bool {
+        validDirectory(testRoot, permissions: 0o700)
+            && validMarker(
+                testRoot.appendingPathComponent(".melete-ui-test-root"),
+                contents: "Melete UI test root v1"
+            )
+            && validDirectory(storeDirectory, permissions: 0o700)
+            && validMarker(
+                storeDirectory.appendingPathComponent(".melete-ui-test-store"),
+                contents: storeMarker
+            )
+    }
+
+    private func validDirectory(_ url: URL, permissions: UInt16) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return false }
+        return attributes[.type] as? FileAttributeType == .typeDirectory
+            && (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid()
+            && (attributes[.posixPermissions] as? NSNumber)?.uint16Value == permissions
+    }
+
+    private func validMarker(_ url: URL, contents: String) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return false }
+        return attributes[.type] as? FileAttributeType == .typeRegular
+            && (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid()
+            && (attributes[.posixPermissions] as? NSNumber)?.uint16Value == 0o600
+            && (try? String(contentsOf: url, encoding: .utf8)) == contents
+    }
+}
+
+private enum IsolatedV2SetupError: Error {
+    case invalidRoot
+    case invalidStore
+}

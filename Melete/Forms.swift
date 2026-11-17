@@ -132,12 +132,14 @@ struct ExerciseNameEditForm: View {
 struct MetricDefinitionEditForm: View {
     @Environment(\.dismiss) private var dismiss
     let exercise: Exercise
+    let allowsExistingDefinitionEditing: Bool
     var onSave: ([MetricDefinitionDraft]) -> String?
     @State private var metrics: [MetricDefinitionDraft]
     @State private var validationError: String?
 
-    init(exercise: Exercise, onSave: @escaping ([MetricDefinitionDraft]) -> String?) {
+    init(exercise: Exercise, allowsExistingDefinitionEditing: Bool = false, onSave: @escaping ([MetricDefinitionDraft]) -> String?) {
         self.exercise = exercise
+        self.allowsExistingDefinitionEditing = allowsExistingDefinitionEditing
         self.onSave = onSave
         _metrics = State(initialValue: MetricDefinitionEditing.draft(for: exercise))
     }
@@ -146,14 +148,16 @@ struct MetricDefinitionEditForm: View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("記録項目を管理").font(.system(.title, design: .rounded).weight(.bold))
-                Text("\(exercise.name)の項目を追加し、入力欄で使うかを選びます。過去の記録は変更されません。")
+                Text(allowsExistingDefinitionEditing
+                     ? "\(exercise.name)の項目定義を編集できます。過去の記録は記録当時の名前・単位・入力条件・値を保持します。"
+                     : "\(exercise.name)の項目を追加し、入力欄で使うかを選びます。過去の記録は変更されません。")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
             Form {
                 Section("項目一覧") {
                     ForEach($metrics) { $metric in
                         VStack(alignment: .leading, spacing: 8) {
-                            if metric.original == nil {
+                            if metric.original == nil || allowsExistingDefinitionEditing {
                                 TextField("項目名（例: 重量）", text: $metric.name)
                                 HStack {
                                     TextField("単位（例: kg）", text: $metric.unit).frame(maxWidth: 130)

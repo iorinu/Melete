@@ -4,6 +4,121 @@ import SwiftData
 
 @MainActor
 final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
+    func testExperimentalV2SelectionRequiresValidOwnedIsolationAndRejectsInvalidMarker() throws {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.appendingPathComponent("MeleteV2IsolationSafety-\(UUID().uuidString)", isDirectory: true)
+        let storeDirectory = root.appendingPathComponent("store", isDirectory: true)
+        try manager.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        try manager.createDirectory(at: storeDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storeDirectory.path)
+        try Data("Melete UI test root v1".utf8).write(to: root.appendingPathComponent(UITestStoreIsolation.rootMarker))
+        try Data(UUID().uuidString.utf8).write(to: storeDirectory.appendingPathComponent(UITestStoreIsolation.storeMarker))
+
+        let validArguments = ["--melete-ui-test-root", root.path, "--melete-ui-test-store", storeDirectory.path]
+        let experimentalArguments = validArguments + ["--melete-v2-experimental"]
+        let isolatedURL = try XCTUnwrap(UITestStoreIsolation.storeURL(arguments: experimentalArguments))
+        XCTAssertEqual(isolatedURL, storeDirectory.appendingPathComponent("Melete.store"))
+        XCTAssertTrue(StoreModeSelection.experimentalV2Enabled(arguments: experimentalArguments, isDebug: true, isolatedStoreIsValid: true))
+
+        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: ["--melete-v2-experimental"], isDebug: true, isolatedStoreIsValid: false), "V2フラグ単独では通常ストアを選択しない")
+        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: validArguments + ["--melete-v2-experimental", "--melete-v2-experimental"], isDebug: true, isolatedStoreIsValid: true), "重複フラグを拒否する")
+        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: ["--melete-ui-test-root", root.path, "--melete-v2-experimental"], isDebug: true, isolatedStoreIsValid: false), "store引数がない場合は拒否する")
+        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: ["--melete-ui-test-store", storeDirectory.path, "--melete-v2-experimental"], isDebug: true, isolatedStoreIsValid: false), "root引数がない場合は拒否する")
+        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: experimentalArguments, isDebug: false, isolatedStoreIsValid: true), "DEBUG以外では拒否する")
+
+        try Data("not-a-uuid".utf8).write(to: storeDirectory.appendingPathComponent(UITestStoreIsolation.storeMarker))
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: experimentalArguments))
+        XCTAssertFalse(StoreModeSelection.experimentalV2Enabled(arguments: experimentalArguments, isDebug: true, isolatedStoreIsValid: UITestStoreIsolation.storeURL(arguments: experimentalArguments) != nil), "無効markerでは通常ストアへfallbackしない")
+    }
+
+    func testUITestStoreIsolationRejectsHardLinkedStoreFilesAndAcceptsRegularStore() throws {
+        for name in ["Melete.store", "Melete.store-wal", "Melete.store-shm"] {
+            let fixture = try makeHardLinkIsolationFixture(fileName: name)
+            XCTAssertNil(
+                UITestStoreIsolation.storeURL(arguments: fixture.arguments),
+                "\(name) がroot外の合成ファイルへのhard linkなら拒否する"
+            )
+        }
+
+        let regularFixture = try makeHardLinkIsolationFixture(fileName: "Melete.store", createHardLink: false)
+        XCTAssertEqual(
+            UITestStoreIsolation.storeURL(arguments: regularFixture.arguments),
+            regularFixture.storeDirectory.appendingPathComponent("Melete.store"),
+            "hard linkでない通常ファイルの隔離ストアは受理する"
+        )
+
+        for linkedMarker in [UITestStoreIsolation.rootMarker, UITestStoreIsolation.storeMarker] {
+            let fixture = try makeHardLinkIsolationFixture(fileName: "Melete.store", linkedMarker: linkedMarker)
+            XCTAssertNil(UITestStoreIsolation.storeURL(arguments: fixture.arguments), "\(linkedMarker) がroot外の合成ファイルへのhard linkなら拒否する")
+        }
+
+        let outsideTemporaryRoot = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("MeleteOutsideTemporaryRoot-\(UUID().uuidString)", isDirectory: true)
+        let outsideFixture = try makeHardLinkIsolationFixture(fileName: "Melete.store", createHardLink: false, rootURL: outsideTemporaryRoot)
+        XCTAssertNil(UITestStoreIsolation.storeURL(arguments: outsideFixture.arguments), "NSTemporaryDirectory外の正規rootを拒否する")
+    }
+
+    private func makeHardLinkIsolationFixture(
+        fileName: String,
+        createHardLink: Bool = true,
+        linkedMarker: String? = nil,
+        rootURL: URL? = nil
+    ) throws -> (arguments: [String], storeDirectory: URL) {
+        let manager = FileManager.default
+        let temporaryDirectory = manager.temporaryDirectory
+        let fixtureID = UUID().uuidString
+        let root = rootURL ?? temporaryDirectory
+            .appendingPathComponent("MeleteHardLinkIsolation-\(fixtureID)", isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        try manager.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let storeDirectory = root.appendingPathComponent("store", isDirectory: true)
+
+        try manager.createDirectory(at: storeDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let rootMarkerURL = root.appendingPathComponent(UITestStoreIsolation.rootMarker)
+        let storeMarkerURL = storeDirectory.appendingPathComponent(UITestStoreIsolation.storeMarker)
+        let rootMarkerContents = Data("Melete UI test root v1".utf8)
+        let storeMarkerContents = Data(UUID().uuidString.utf8)
+        if linkedMarker == UITestStoreIsolation.rootMarker {
+            let target = temporaryDirectory.appendingPathComponent("MeleteHardLinkTarget-\(fixtureID)-root-marker")
+            guard manager.createFile(atPath: target.path, contents: rootMarkerContents), manager.createFile(atPath: storeMarkerURL.path, contents: storeMarkerContents) else { throw IsolationFixtureError.cannotCreateMarkers }
+            try manager.linkItem(at: target, to: rootMarkerURL)
+        } else if linkedMarker == UITestStoreIsolation.storeMarker {
+            let target = temporaryDirectory.appendingPathComponent("MeleteHardLinkTarget-\(fixtureID)-store-marker")
+            guard manager.createFile(atPath: target.path, contents: storeMarkerContents), manager.createFile(atPath: rootMarkerURL.path, contents: rootMarkerContents) else { throw IsolationFixtureError.cannotCreateMarkers }
+            try manager.linkItem(at: target, to: storeMarkerURL)
+        } else {
+            guard manager.createFile(atPath: rootMarkerURL.path, contents: rootMarkerContents), manager.createFile(atPath: storeMarkerURL.path, contents: storeMarkerContents) else { throw IsolationFixtureError.cannotCreateMarkers }
+        }
+
+        let storeFile = storeDirectory.appendingPathComponent(fileName)
+        if linkedMarker != nil {
+            // このケースではマーカーだけを検証するため、store本体は通常ファイルにする。
+            guard manager.createFile(atPath: storeFile.path, contents: Data("合成通常store".utf8)) else { throw IsolationFixtureError.cannotCreateRegularStore }
+        } else if createHardLink {
+            let externalFile = temporaryDirectory.appendingPathComponent("MeleteHardLinkTarget-\(fixtureID)")
+            guard manager.createFile(atPath: externalFile.path, contents: Data("合成hard link対象".utf8)) else {
+                throw IsolationFixtureError.cannotCreateHardLinkTarget
+            }
+            try manager.linkItem(at: externalFile, to: storeFile)
+        } else {
+            guard manager.createFile(atPath: storeFile.path, contents: Data("合成通常store".utf8)) else {
+                throw IsolationFixtureError.cannotCreateRegularStore
+            }
+        }
+
+        return (
+            ["--melete-ui-test-root", root.path, "--melete-ui-test-store", storeDirectory.path],
+            storeDirectory
+        )
+    }
+
+    private enum IsolationFixtureError: Error {
+        case cannotCreateMarkers
+        case cannotCreateHardLinkTarget
+        case cannotCreateRegularStore
+    }
+
     private struct Fixture {
         let container: ModelContainer
         let context: ModelContext
@@ -663,5 +778,116 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         try verify(ModelContext(migrated))
         let reopened = try ModelContainer(for: v2Schema, migrationPlan: MeleteMigrationPlan.self, configurations: [v2Configuration])
         try verify(ModelContext(reopened))
+    }
+
+    func testProductionMigrationThenAllWorkoutWritesThroughV2ServiceAndReopen() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteV2ServiceVerticalSlice-\(UUID().uuidString).sqlite")
+        let v1Schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let v1Configuration = ModelConfiguration("MeleteV2ServiceVerticalSliceV1", schema: v1Schema, url: storeURL, cloudKitDatabase: .none)
+        let exerciseID = UUID()
+        let metricID = UUID()
+        let oldWorkoutID = UUID()
+        let unaffectedWorkoutID = UUID()
+        let oldValueSnapshots: [WorkoutValueSnapshot]
+
+        do {
+            let v1 = try ModelContainer(for: v1Schema, configurations: [v1Configuration])
+            let context = ModelContext(v1)
+            let metric = MetricDefinition(name: "重量", unit: "kg", allowsDecimal: false, isRequired: false, sortOrder: 0)
+            metric.id = metricID
+            let exercise = Exercise(name: "合成種目", metrics: [metric])
+            exercise.id = exerciseID
+            let firstValue = MetricValue(metric: metric, scaledValue: 12_000)
+            firstValue.name = "記録当時の重量"
+            firstValue.unit = "lb"
+            let secondValue = MetricValue(metric: metric, scaledValue: 15_000)
+            let oldWorkout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [
+                ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [
+                    SetRecord(sortOrder: 1, values: [firstValue]),
+                    SetRecord(sortOrder: 2, values: [secondValue])
+                ])
+            ])
+            oldWorkout.id = oldWorkoutID
+            let unaffectedValue = MetricValue(metric: metric, scaledValue: 7_000)
+            let unaffectedWorkout = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [
+                ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [unaffectedValue])])
+            ])
+            unaffectedWorkout.id = unaffectedWorkoutID
+            oldValueSnapshots = [firstValue, secondValue, unaffectedValue].map(WorkoutValueSnapshot.init)
+            context.insert(exercise)
+            context.insert(oldWorkout)
+            context.insert(unaffectedWorkout)
+            try context.save()
+        }
+
+        let v2Schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let v2Configuration = ModelConfiguration("MeleteV2ServiceVerticalSliceV2", schema: v2Schema, url: storeURL, cloudKitDatabase: .none)
+        let migrated = try ModelContainer(for: v2Schema, migrationPlan: MeleteMigrationPlan.self, configurations: [v2Configuration])
+        let context = ModelContext(migrated)
+        let service = WorkoutWritingServiceV2(context: context)
+        let exercise = try XCTUnwrap(try context.fetch(FetchDescriptor<Exercise>()).first { $0.id == exerciseID })
+        let metric = try XCTUnwrap(exercise.metrics.first { $0.id == metricID })
+        var definitionDrafts = MetricDefinitionEditing.draft(for: exercise)
+        definitionDrafts[0].name = "出力"
+        definitionDrafts[0].unit = "W"
+        definitionDrafts[0].allowsDecimal = true
+        definitionDrafts[0].isRequired = true
+
+        // スタブで明示的に失敗する。実装後は同じservice APIの全操作が通る縦切りとなる。
+        try service.saveMetricDefinitions(definitionDrafts, for: exercise)
+
+        var entry = WorkoutEntryDraft(exercise: exercise)
+        entry.sets[0].values[metricID] = "2.5"
+        let newWorkout = try service.createWorkout(day: Date(timeIntervalSince1970: 1_700_100_000), entries: [entry])
+
+        let oldWorkout = try XCTUnwrap(try context.fetch(FetchDescriptor<Workout>()).first { $0.id == oldWorkoutID })
+        let oldRecord = try XCTUnwrap(oldWorkout.records.first)
+        let addition = try XCTUnwrap(WorkoutValueEditing.appendSetDraft(for: oldRecord, exercise: exercise))
+        var filledAddition = addition
+        filledAddition.values[metricID] = "3.5"
+        let existingValueDrafts = WorkoutValueEditing.drafts(for: oldWorkout)
+        try service.saveWorkoutEdits(existingValueDrafts, additions: [filledAddition], day: try XCTUnwrap(WorkoutValueEditing.date(from: oldWorkout.day)), to: oldWorkout, exercises: [exercise])
+
+        let targetSet = try XCTUnwrap(oldRecord.sets.first { $0.sortOrder == 3 })
+        let partiallyDeletedValueID = try XCTUnwrap(targetSet.values.first).id
+        try service.deleteSet(WorkoutSetDeletionTarget(workout: oldWorkout, record: oldRecord, set: targetSet))
+
+        let reopened = try ModelContainer(for: v2Schema, migrationPlan: MeleteMigrationPlan.self, configurations: [v2Configuration])
+        let reopenedContext = ModelContext(reopened)
+        XCTAssertNotNil(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == oldWorkoutID })
+        XCTAssertNotNil(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == newWorkout.id })
+        let unaffectedWorkout = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == unaffectedWorkoutID })
+        XCTAssertEqual(unaffectedWorkout.records.flatMap(\.sets).flatMap(\.values).map(WorkoutValueSnapshot.init), [oldValueSnapshots[2]])
+
+        let savedMetric = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<MetricDefinition>()).first { $0.id == metricID })
+        XCTAssertEqual(savedMetric.name, "出力")
+        XCTAssertEqual(savedMetric.unit, "W")
+        XCTAssertTrue(savedMetric.allowsDecimal)
+        XCTAssertTrue(savedMetric.isRequired)
+        let oldValues = try reopenedContext.fetch(FetchDescriptor<MetricValue>()).filter { $0.id == oldValueSnapshots[0].id || $0.id == oldValueSnapshots[1].id }
+        XCTAssertEqual(oldValues.map(WorkoutValueSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }, Array(oldValueSnapshots.prefix(2)).sorted { $0.id.uuidString < $1.id.uuidString })
+        XCTAssertFalse(try reopenedContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).contains { $0.valueID == partiallyDeletedValueID })
+        XCTAssertTrue(try reopenedContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).allSatisfy { link in
+            !oldValues.contains { $0.id == link.valueID }
+        })
+        let revisions = try reopenedContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        let currentRevision = try XCTUnwrap(revisions.first { $0.metricID == metricID && $0.revision == 2 })
+        XCTAssertEqual(currentRevision.name, "出力")
+        XCTAssertEqual(currentRevision.unit, "W")
+        let newWorkoutValues = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<Workout>()).first { $0.id == newWorkout.id })
+            .records.flatMap(\.sets).flatMap(\.values)
+        let newWorkoutValue = try XCTUnwrap(newWorkoutValues.first)
+        XCTAssertEqual(newWorkoutValue.name, "出力")
+        XCTAssertEqual(newWorkoutValue.unit, "W")
+        let newWorkoutLink = try XCTUnwrap(try reopenedContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).first { $0.valueID == newWorkoutValue.id })
+        XCTAssertEqual(newWorkoutLink.revisionID, currentRevision.id)
+
+        let reopenedService = WorkoutWritingServiceV2(context: reopenedContext)
+        try reopenedService.deleteWorkout(id: newWorkout.id)
+        let afterDeletion = ModelContext(reopened)
+        XCTAssertNil(try afterDeletion.fetch(FetchDescriptor<Workout>()).first { $0.id == newWorkout.id })
+        XCTAssertFalse(try afterDeletion.fetch(FetchDescriptor<MetricValueRevisionLink>()).contains { $0.valueID == newWorkoutValue.id })
+        XCTAssertEqual(Set(try afterDeletion.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id)), Set([currentRevision.id, try XCTUnwrap(revisions.first { $0.metricID == metricID && $0.revision == 1 }).id]))
     }
 }
