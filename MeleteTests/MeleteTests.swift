@@ -108,7 +108,8 @@ final class MeleteTests: XCTestCase {
         _ = try MetricValueRevisionLinking.register(value: value, revision: revision, in: context)
         try context.save()
 
-        try WorkoutDeletionV2.delete(workoutID: workout.id, in: context)
+        let target = try WorkoutDeletionV2.captureWorkoutDeletionTarget(workout: workout, in: context)
+        try WorkoutDeletionV2.delete(target, in: context)
 
         XCTAssertTrue(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).isEmpty, "値の削除で対応するrevision linkも削除されるべき")
     }
@@ -421,7 +422,8 @@ final class MeleteTests: XCTestCase {
         for value in [targetValue, retainedValue, otherWorkoutValue] { _ = try MetricValueRevisionLinking.register(value: value, revision: revision, in: context) }
         try context.save()
 
-        try WorkoutDeletionV2.deleteSet(WorkoutSetDeletionTarget(workout: workoutA, record: workoutA.records[0], set: setA), in: context)
+        let deletionTarget = try WorkoutDeletionV2.captureSetDeletionTarget(workout: workoutA, record: workoutA.records[0], set: setA, in: context)
+        try WorkoutDeletionV2.deleteSet(deletionTarget, in: context)
         XCTAssertEqual(workoutA.records.first?.sets.map(\.id), [setB.id])
         XCTAssertEqual(Set(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.valueID)), [retainedValue.id, otherWorkoutValue.id])
         XCTAssertEqual(try context.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id), [revision.id])
@@ -439,7 +441,7 @@ final class MeleteTests: XCTestCase {
         context.insert(exercise); context.insert(workout); context.insert(revision)
         _ = try MetricValueRevisionLinking.register(value: value, revision: revision, in: context)
         try context.save()
-        let target = WorkoutRecordDeletionTarget(workout: workout, record: record)
+        let target = try WorkoutDeletionV2.captureRecordDeletionTarget(workout: workout, record: record, in: context)
         XCTAssertThrowsError(try WorkoutDeletionV2.deleteRecord(target, in: context) { _ in throw InjectedMigrationFailure.expected })
         XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).map(\.id), [workout.id])
         XCTAssertEqual(try context.fetch(FetchDescriptor<ExerciseRecord>()).map(\.id), [record.id])
@@ -465,7 +467,7 @@ final class MeleteTests: XCTestCase {
         let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [set])
         let workout = Workout(day: .now, records: [record])
         context.insert(exercise); context.insert(workout); try context.save()
-        let target = WorkoutSetDeletionTarget(workout: workout, record: record, set: set)
+        let target = try WorkoutDeletionV2.captureSetDeletionTarget(workout: workout, record: record, set: set, in: context)
         metric.name = "未保存変更"
         XCTAssertThrowsError(try WorkoutDeletionV2.deleteSet(target, in: context))
         XCTAssertTrue(try context.fetch(FetchDescriptor<Workout>()).contains { $0.id == workout.id })
@@ -2401,7 +2403,8 @@ final class MeleteTests: XCTestCase {
             context.insert(other)
             try context.save()
 
-            try WorkoutDeletion.delete(workoutID: targetID, in: context)
+            let deletionTarget = try WorkoutDeletion.captureTarget(workout: try XCTUnwrap(context.fetch(FetchDescriptor<Workout>()).first { $0.id == targetID }), in: context)
+            try WorkoutDeletion.delete(deletionTarget, in: context)
             XCTAssertEqual(try context.fetch(FetchDescriptor<Workout>()).map(\.id), [otherID])
             XCTAssertTrue(try context.fetch(FetchDescriptor<ExerciseRecord>()).allSatisfy { $0.workout?.id == otherID })
             XCTAssertEqual(try context.fetch(FetchDescriptor<SetRecord>()).count, 1)
@@ -2609,6 +2612,114 @@ final class MeleteTests: XCTestCase {
 
 @MainActor
 final class WorkoutRecordDeletionV2PersistenceTests: XCTestCase {
+    func testV2DeleteRecordRejectsRevisionLinkChangedAfterConfirmationAndPreservesSQLiteState() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteV2RecordDeletionLinkChange-\(UUID().uuidString).sqlite")
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let configuration = ModelConfiguration("MeleteV2RecordDeletionLinkChange", schema: schema, url: storeURL, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+
+        let metric = MetricDefinition(name: "合成負荷", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let revision1 = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: 0)
+        let revision2 = MetricDefinitionRevision(metricID: metric.id, revision: 2, name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: 0)
+        let value1 = MetricValue(metric: metric, scaledValue: 12_500)
+        let value2 = MetricValue(metric: metric, scaledValue: 13_500)
+        let targetRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [
+            SetRecord(sortOrder: 1, values: [value1]),
+            SetRecord(sortOrder: 2, values: [value2]),
+        ])
+        let targetWorkout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [targetRecord])
+        let otherValue = MetricValue(metric: metric, scaledValue: 87_500)
+        let otherRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [otherValue])])
+        let otherWorkout = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [otherRecord])
+        context.insert(exercise); context.insert(targetWorkout); context.insert(otherWorkout)
+        context.insert(revision1); context.insert(revision2)
+        let link1 = try MetricValueRevisionLinking.register(value: value1, revision: revision1, in: context)
+        let link2 = try MetricValueRevisionLinking.register(value: value2, revision: revision1, in: context)
+        let otherLink = try MetricValueRevisionLinking.register(value: otherValue, revision: revision1, in: context)
+        try context.save()
+
+        let service = WorkoutWritingServiceV2(context: context)
+        let target = try service.captureRecordDeletionTarget(workout: targetWorkout, record: targetRecord)
+        let changedLink = MetricValueRevisionLink(valueID: value1.id, revisionID: revision2.id)
+        context.delete(link1)
+        context.insert(changedLink)
+        try context.save()
+
+        XCTAssertThrowsError(try service.deleteRecord(target), "確認後にrecord内の履歴linkだけが変わった場合も削除確認をやり直す") { error in
+            guard case WorkoutSetDeletionError.changed = error else { return XCTFail("changedとして拒否する必要: \(error)") }
+        }
+
+        let reopenedContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let reopened = ModelContext(reopenedContainer)
+        let workouts = try reopened.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(workouts.map(\.id)), [targetWorkout.id, otherWorkout.id])
+        let savedRecord = try XCTUnwrap(workouts.first { $0.id == targetWorkout.id }?.records.first)
+        XCTAssertEqual(Set(savedRecord.sets.map(\.id)), Set(targetRecord.sets.map(\.id)))
+        let savedValues = try reopened.fetch(FetchDescriptor<MetricValue>())
+        XCTAssertEqual(Set(savedValues.map(\.id)), [value1.id, value2.id, otherValue.id])
+        XCTAssertEqual(
+            savedValues.map(WorkoutValueSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString },
+            [value1, value2, otherValue].map(WorkoutValueSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        )
+        let savedLinks = try reopened.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(Set(savedLinks.map(\.id)), [changedLink.id, link2.id, otherLink.id])
+        XCTAssertEqual(try XCTUnwrap(savedLinks.first { $0.valueID == value1.id }).revisionID, revision2.id)
+        XCTAssertTrue(workouts.contains { $0.id == otherWorkout.id })
+    }
+
+    func testV2DeleteSetRejectsRevisionLinkOnlyChangeCapturedForConfirmation() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteV2SetDeletionLinkChange-\(UUID().uuidString).sqlite")
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let configuration = ModelConfiguration("MeleteV2SetDeletionLinkChange", schema: schema, url: storeURL, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+
+        let metric = MetricDefinition(name: "合成負荷", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let revision1 = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: 0)
+        let revision2 = MetricDefinitionRevision(metricID: metric.id, revision: 2, name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: 0)
+        let value = MetricValue(metric: metric, scaledValue: 12_500)
+        let targetSet = SetRecord(sortOrder: 1, values: [value])
+        let targetRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [targetSet])
+        let targetWorkout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [targetRecord])
+        let otherValue = MetricValue(metric: metric, scaledValue: 87_500)
+        let otherSet = SetRecord(sortOrder: 1, values: [otherValue])
+        let otherRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [otherSet])
+        let otherWorkout = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [otherRecord])
+        context.insert(exercise); context.insert(targetWorkout); context.insert(otherWorkout)
+        context.insert(revision1); context.insert(revision2)
+        let linkR1 = try MetricValueRevisionLinking.register(value: value, revision: revision1, in: context)
+        let otherLink = try MetricValueRevisionLinking.register(value: otherValue, revision: revision1, in: context)
+        try context.save()
+
+        let service = WorkoutWritingServiceV2(context: context)
+        let target = try service.captureSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSet)
+        let linkR2 = MetricValueRevisionLink(valueID: value.id, revisionID: revision2.id)
+        context.delete(linkR1)
+        context.insert(linkR2)
+        try context.save()
+
+        XCTAssertThrowsError(try service.deleteSet(target), "確認後のrevision linkだけが変わった場合も削除確認をやり直す") { error in
+            guard case WorkoutSetDeletionError.changed = error else { return XCTFail("changedとして拒否する必要: \(error)") }
+        }
+
+        let reopenedContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let reopened = ModelContext(reopenedContainer)
+        let workouts = try reopened.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(workouts.map(\.id)), [targetWorkout.id, otherWorkout.id])
+        let savedTarget = try XCTUnwrap(workouts.first { $0.id == targetWorkout.id })
+        XCTAssertEqual(savedTarget.records.first?.sets.map(\.id), [targetSet.id])
+        let savedValues = try reopened.fetch(FetchDescriptor<MetricValue>())
+        XCTAssertEqual(Set(savedValues.map(\.id)), [value.id, otherValue.id])
+        XCTAssertEqual(try XCTUnwrap(savedValues.first { $0.id == value.id }).scaledValue, 12_500)
+        XCTAssertEqual(Set(try reopened.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.id)), [linkR2.id, otherLink.id])
+        XCTAssertEqual(try XCTUnwrap(try reopened.fetch(FetchDescriptor<MetricValueRevisionLink>()).first { $0.valueID == value.id }).revisionID, revision2.id)
+    }
+
     func testV2DeleteLastSetThroughServicePersistsEmptyRecordAndWorkoutCascadeInSQLite() throws {
         let storeURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("MeleteV2LastSetDeletionPersistence-\(UUID().uuidString).sqlite")
@@ -2646,9 +2757,9 @@ final class WorkoutRecordDeletionV2PersistenceTests: XCTestCase {
         let otherLinkID = otherLink.id
         let revisionID = revision.id
 
-        try WorkoutWritingServiceV2(context: context).deleteSet(
-            WorkoutSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSet)
-        )
+        let deletionService = WorkoutWritingServiceV2(context: context)
+        let deletionTarget = try deletionService.captureSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSet)
+        try deletionService.deleteSet(deletionTarget)
 
         let reopenedContainer = try ModelContainer(for: schema, configurations: [configuration])
         let reopened = ModelContext(reopenedContainer)
@@ -2725,7 +2836,8 @@ final class WorkoutRecordDeletionV2PersistenceTests: XCTestCase {
         let revisionIDs = Set([revisionA.id, revisionB.id])
 
         let service = WorkoutWritingServiceV2(context: context)
-        try service.deleteRecord(WorkoutRecordDeletionTarget(workout: targetWorkout, record: removedRecord))
+        let removedTarget = try service.captureRecordDeletionTarget(workout: targetWorkout, record: removedRecord)
+        try service.deleteRecord(removedTarget)
 
         let afterPartialContainer = try ModelContainer(for: schema, configurations: [configuration])
         let afterPartial = ModelContext(afterPartialContainer)
@@ -2744,7 +2856,8 @@ final class WorkoutRecordDeletionV2PersistenceTests: XCTestCase {
         XCTAssertEqual(Set(try afterPartial.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id)), revisionIDs)
 
         let lastTarget = try XCTUnwrap(partialTarget.records.first { $0.id == retainedRecordID })
-        try WorkoutWritingServiceV2(context: afterPartial).deleteRecord(WorkoutRecordDeletionTarget(workout: partialTarget, record: lastTarget))
+        let lastDeletionTarget = try WorkoutWritingServiceV2(context: afterPartial).captureRecordDeletionTarget(workout: partialTarget, record: lastTarget)
+        try WorkoutWritingServiceV2(context: afterPartial).deleteRecord(lastDeletionTarget)
 
         let afterLastContainer = try ModelContainer(for: schema, configurations: [configuration])
         let afterLast = ModelContext(afterLastContainer)
@@ -2786,7 +2899,8 @@ final class WorkoutRecordDeletionV2PersistenceTests: XCTestCase {
         try contextA.save()
         XCTAssertFalse(contextA.hasChanges)
 
-        let target = WorkoutSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSet)
+        let service = WorkoutWritingServiceV2(context: contextA)
+        let target = try service.captureSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSet)
         let containerB = try ModelContainer(for: schema, configurations: [configuration])
         let contextB = ModelContext(containerB)
         let valueID = targetValue.id
@@ -2841,7 +2955,7 @@ final class WorkoutRecordDeletionV2PersistenceTests: XCTestCase {
         try contextA.save()
         XCTAssertFalse(contextA.hasChanges)
 
-        let target = WorkoutRecordDeletionTarget(workout: targetWorkout, record: targetRecord)
+        let target = try WorkoutWritingServiceV2(context: contextA).captureRecordDeletionTarget(workout: targetWorkout, record: targetRecord)
         let containerB = try ModelContainer(for: schema, configurations: [configuration])
         let contextB = ModelContext(containerB)
         let recordID = targetRecord.id
@@ -3101,5 +3215,308 @@ extension MeleteTests {
         XCTAssertEqual(restoredName.seriesID, restoredNameSeriesID, "名前を戻しても別系列を割り当てる")
         XCTAssertNotEqual(restoredName.seriesID, originalSeriesID)
         XCTAssertNotEqual(restoredName.seriesID, renamedSeriesID)
+    }
+}
+
+@MainActor
+final class WorkoutDeletionV2ConfirmationSnapshotTests: XCTestCase {
+    private func makeSQLiteContext(name: String) throws -> (ModelConfiguration, ModelContext) {
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(name)-\(UUID().uuidString).sqlite")
+        let configuration = ModelConfiguration(name, schema: schema, url: url, cloudKitDatabase: .none)
+        return (configuration, ModelContext(try ModelContainer(for: schema, configurations: [configuration])))
+    }
+
+    func testWorkoutDeletionRejectsValueChangeAfterConfirmationAndPreservesSQLiteGraph() throws {
+        let (configuration, context) = try makeSQLiteContext(name: "MeleteV2WorkoutDeletionValueSnapshot")
+        let metric = MetricDefinition(name: "負荷", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "対象種目", metrics: [metric])
+        let revision = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: 0)
+        let valueA = MetricValue(metric: metric, scaledValue: 12_000)
+        let valueB = MetricValue(metric: metric, scaledValue: 8_000)
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [
+            SetRecord(sortOrder: 1, values: [valueA]), SetRecord(sortOrder: 2, values: [valueB]),
+        ])
+        let workout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [record])
+        let otherValue = MetricValue(metric: metric, scaledValue: 30_000)
+        let otherWorkout = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [
+            ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [otherValue])]),
+        ])
+        context.insert(exercise); context.insert(workout); context.insert(otherWorkout); context.insert(revision)
+        let links = try [valueA, valueB, otherValue].map { try MetricValueRevisionLinking.register(value: $0, revision: revision, in: context) }
+        try context.save()
+
+        let service = WorkoutWritingServiceV2(context: context)
+        let target = try service.captureWorkoutDeletionTarget(workout: workout)
+        valueA.scaledValue = 13_000
+        try context.save()
+
+        XCTAssertThrowsError(try service.deleteWorkout(target), "確認後にWorkout内の値が変われば全体削除を拒否") { error in
+            guard case WorkoutSetDeletionError.changed = error else { return XCTFail("changedとして拒否する必要: \(error)") }
+        }
+
+        let thirdContainer = try ModelContainer(for: Schema(versionedSchema: MeleteSchemaV2.self), configurations: [configuration])
+        let thirdContext = ModelContext(thirdContainer)
+        let savedWorkouts = try thirdContext.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(savedWorkouts.map(\.id)), [workout.id, otherWorkout.id])
+        XCTAssertEqual(Set(try thirdContext.fetch(FetchDescriptor<ExerciseRecord>()).map(\.id)), [record.id, otherWorkout.records[0].id])
+        XCTAssertEqual(Set(try thirdContext.fetch(FetchDescriptor<SetRecord>()).map(\.id)), Set(record.sets.map(\.id) + otherWorkout.records.flatMap(\.sets).map(\.id)))
+        let savedValues = try thirdContext.fetch(FetchDescriptor<MetricValue>())
+        XCTAssertEqual(Set(savedValues.map(\.id)), [valueA.id, valueB.id, otherValue.id])
+        XCTAssertEqual(savedValues.first { $0.id == valueA.id }?.scaledValue, 13_000)
+        XCTAssertEqual(savedValues.first { $0.id == valueB.id }?.scaledValue, 8_000)
+        XCTAssertEqual(savedValues.first { $0.id == otherValue.id }?.scaledValue, 30_000)
+        XCTAssertEqual(Set(try thirdContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.id)), Set(links.map(\.id)))
+    }
+
+    func testWorkoutDeletionRejectsHistoryLinkChangeAfterConfirmationAndPreservesSQLiteGraph() throws {
+        let (configuration, context) = try makeSQLiteContext(name: "MeleteV2WorkoutDeletionLinkSnapshot")
+        let metric = MetricDefinition(name: "負荷", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "対象種目", metrics: [metric])
+        let revision1 = MetricDefinitionRevision(metricID: metric.id, revision: 1, name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: 0)
+        let revision2 = MetricDefinitionRevision(metricID: metric.id, revision: 2, name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: 0)
+        let valueA = MetricValue(metric: metric, scaledValue: 12_000)
+        let valueB = MetricValue(metric: metric, scaledValue: 8_000)
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [
+            SetRecord(sortOrder: 1, values: [valueA]), SetRecord(sortOrder: 2, values: [valueB]),
+        ])
+        let workout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [record])
+        let otherValue = MetricValue(metric: metric, scaledValue: 30_000)
+        let otherWorkout = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [
+            ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [otherValue])]),
+        ])
+        context.insert(exercise); context.insert(workout); context.insert(otherWorkout); context.insert(revision1); context.insert(revision2)
+        let linkA = try MetricValueRevisionLinking.register(value: valueA, revision: revision1, in: context)
+        let linkB = try MetricValueRevisionLinking.register(value: valueB, revision: revision1, in: context)
+        let otherLink = try MetricValueRevisionLinking.register(value: otherValue, revision: revision1, in: context)
+        try context.save()
+
+        let service = WorkoutWritingServiceV2(context: context)
+        let target = try service.captureWorkoutDeletionTarget(workout: workout)
+        context.delete(linkA)
+        let replacementLink = MetricValueRevisionLink(valueID: valueA.id, revisionID: revision2.id)
+        context.insert(replacementLink)
+        try context.save()
+
+        XCTAssertThrowsError(try service.deleteWorkout(target), "確認後に履歴linkだけがR1からR2へ変われば全体削除を拒否") { error in
+            guard case WorkoutSetDeletionError.changed = error else { return XCTFail("changedとして拒否する必要: \(error)") }
+        }
+
+        let thirdContainer = try ModelContainer(for: Schema(versionedSchema: MeleteSchemaV2.self), configurations: [configuration])
+        let thirdContext = ModelContext(thirdContainer)
+        let savedWorkouts = try thirdContext.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(savedWorkouts.map(\.id)), [workout.id, otherWorkout.id])
+        XCTAssertEqual(Set(try thirdContext.fetch(FetchDescriptor<ExerciseRecord>()).map(\.id)), [record.id, otherWorkout.records[0].id])
+        XCTAssertEqual(Set(try thirdContext.fetch(FetchDescriptor<SetRecord>()).map(\.id)), Set(record.sets.map(\.id) + otherWorkout.records.flatMap(\.sets).map(\.id)))
+        let savedValues = try thirdContext.fetch(FetchDescriptor<MetricValue>())
+        XCTAssertEqual(Set(savedValues.map(\.id)), [valueA.id, valueB.id, otherValue.id])
+        XCTAssertEqual(savedValues.first { $0.id == valueA.id }?.scaledValue, 12_000)
+        XCTAssertEqual(savedValues.first { $0.id == valueB.id }?.scaledValue, 8_000)
+        XCTAssertEqual(savedValues.first { $0.id == otherValue.id }?.scaledValue, 30_000)
+        let savedLinks = try thirdContext.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(Set(savedLinks.map(\.id)), [replacementLink.id, linkB.id, otherLink.id])
+        XCTAssertEqual(savedLinks.first { $0.valueID == valueA.id }?.revisionID, revision2.id)
+    }
+}
+
+@MainActor
+final class WorkoutDeletionV1ConfirmationSnapshotTests: XCTestCase {
+    func testSetDeletionRejectsValueChangedAndSavedBySeparateContainer() throws {
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteV1SetDeletionCrossContext-\(UUID().uuidString).sqlite")
+        let configuration = ModelConfiguration("MeleteV1SetDeletionCrossContext", schema: schema, url: url, cloudKitDatabase: .none)
+        let containerA = try ModelContainer(for: schema, configurations: [configuration])
+        let contextA = ModelContext(containerA)
+        let metric = MetricDefinition(name: "合成負荷", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let targetValue = MetricValue(metric: metric, scaledValue: 10_000)
+        let retainedValue = MetricValue(metric: metric, scaledValue: 20_000)
+        let targetSet = SetRecord(sortOrder: 1, values: [targetValue])
+        let retainedSet = SetRecord(sortOrder: 2, values: [retainedValue])
+        let targetRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [targetSet, retainedSet])
+        let targetWorkout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [targetRecord])
+        let otherValue = MetricValue(metric: metric, scaledValue: 30_000)
+        let otherRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [otherValue])])
+        let otherWorkout = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [otherRecord])
+        contextA.insert(exercise); contextA.insert(targetWorkout); contextA.insert(otherWorkout)
+        try contextA.save()
+        XCTAssertFalse(contextA.hasChanges, "削除確認前はAをcleanにする")
+
+        let target = WorkoutSetDeletionTarget(workout: targetWorkout, record: targetRecord, set: targetSet)
+        let containerB = try ModelContainer(for: schema, configurations: [configuration])
+        let contextB = ModelContext(containerB)
+        let valueB = try XCTUnwrap(try contextB.fetch(FetchDescriptor<MetricValue>()).first { $0.id == targetValue.id })
+        valueB.scaledValue = 11_000
+        try contextB.save()
+        XCTAssertFalse(contextB.hasChanges, "Bの更新保存後はclean")
+
+        XCTAssertFalse(contextA.hasChanges, "Bの保存後もAはclean")
+        XCTAssertThrowsError(try WorkoutSetDeletion.delete(target, in: contextA) { try contextA.save() }, "別containerで更新されたsetの削除確認を拒否") { error in
+            guard case WorkoutSetDeletionError.changed = error else { return XCTFail("changedとして拒否する必要: \(error)") }
+        }
+        XCTAssertFalse(contextA.hasChanges, "拒否後もA contextはclean")
+
+        let verificationContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let verificationContext = ModelContext(verificationContainer)
+        let savedWorkouts = try verificationContext.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(savedWorkouts.map(\.id)), [targetWorkout.id, otherWorkout.id])
+        XCTAssertEqual(try XCTUnwrap(savedWorkouts.first { $0.id == targetWorkout.id }).records.first?.sets.map(\.id).sorted { $0.uuidString < $1.uuidString }, [targetSet.id, retainedSet.id].sorted { $0.uuidString < $1.uuidString })
+        let savedValues = try verificationContext.fetch(FetchDescriptor<MetricValue>())
+        XCTAssertEqual(Set(savedValues.map(\.id)), [targetValue.id, retainedValue.id, otherValue.id])
+        XCTAssertEqual(try XCTUnwrap(savedValues.first { $0.id == targetValue.id }).scaledValue, 11_000)
+        XCTAssertEqual(try XCTUnwrap(savedValues.first { $0.id == retainedValue.id }).scaledValue, 20_000)
+        XCTAssertEqual(try XCTUnwrap(savedValues.first { $0.id == otherValue.id }).scaledValue, 30_000)
+        XCTAssertEqual(Set(try verificationContext.fetch(FetchDescriptor<ExerciseRecord>()).map(\.id)), [targetRecord.id, otherRecord.id])
+    }
+
+    func testRecordDeletionRejectsSetAddedAndSavedBySeparateContainer() throws {
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteV1RecordDeletionCrossContext-\(UUID().uuidString).sqlite")
+        let configuration = ModelConfiguration("MeleteV1RecordDeletionCrossContext", schema: schema, url: url, cloudKitDatabase: .none)
+        let containerA = try ModelContainer(for: schema, configurations: [configuration])
+        let contextA = ModelContext(containerA)
+        let metric = MetricDefinition(name: "合成負荷", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let originalValue = MetricValue(metric: metric, scaledValue: 10_000)
+        let originalSet = SetRecord(sortOrder: 1, values: [originalValue])
+        let retainedValue = MetricValue(metric: metric, scaledValue: 30_000)
+        let retainedSet = SetRecord(sortOrder: 1, values: [retainedValue])
+        let targetRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [originalSet])
+        let retainedRecord = ExerciseRecord(exercise: exercise, sortOrder: 1, sets: [retainedSet])
+        let targetWorkout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [targetRecord, retainedRecord])
+        let otherValue = MetricValue(metric: metric, scaledValue: 40_000)
+        let otherRecord = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [otherValue])])
+        let otherWorkout = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [otherRecord])
+        contextA.insert(exercise); contextA.insert(targetWorkout); contextA.insert(otherWorkout)
+        try contextA.save()
+        XCTAssertFalse(contextA.hasChanges, "削除確認前はAをcleanにする")
+
+        let target = WorkoutRecordDeletionTarget(workout: targetWorkout, record: targetRecord)
+        let containerB = try ModelContainer(for: schema, configurations: [configuration])
+        let contextB = ModelContext(containerB)
+        let recordB = try XCTUnwrap(try contextB.fetch(FetchDescriptor<ExerciseRecord>()).first { $0.id == targetRecord.id })
+        let addedValue = MetricValue(metric: try XCTUnwrap(try contextB.fetch(FetchDescriptor<MetricDefinition>()).first { $0.id == metric.id }), scaledValue: 15_000)
+        let addedSet = SetRecord(sortOrder: 2, values: [addedValue])
+        recordB.sets.append(addedSet)
+        try contextB.save()
+        XCTAssertFalse(contextB.hasChanges, "Bのset/value追加保存後はclean")
+
+        XCTAssertFalse(contextA.hasChanges, "Bの保存後もAはclean")
+        XCTAssertThrowsError(try WorkoutRecordDeletion.delete(target, in: contextA) { try contextA.save() }, "別containerでsetが追加されたrecordの削除確認を拒否") { error in
+            guard case WorkoutSetDeletionError.changed = error else { return XCTFail("changedとして拒否する必要: \(error)") }
+        }
+        XCTAssertFalse(contextA.hasChanges, "拒否後もA contextはclean")
+
+        let verificationContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let verificationContext = ModelContext(verificationContainer)
+        let savedWorkouts = try verificationContext.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(savedWorkouts.map(\.id)), [targetWorkout.id, otherWorkout.id])
+        let savedTargetWorkout = try XCTUnwrap(savedWorkouts.first { $0.id == targetWorkout.id })
+        let savedRecordIDs: Set<UUID> = Set(savedTargetWorkout.records.map { $0.id })
+        XCTAssertEqual(savedRecordIDs, Set([targetRecord.id, retainedRecord.id]))
+        let savedRecords = try verificationContext.fetch(FetchDescriptor<ExerciseRecord>())
+        let savedRecordEntityIDs: Set<UUID> = Set(savedRecords.map { $0.id })
+        XCTAssertEqual(savedRecordEntityIDs, Set([targetRecord.id, retainedRecord.id, otherRecord.id]))
+        let savedSets = try verificationContext.fetch(FetchDescriptor<SetRecord>())
+        let savedSetIDs: Set<UUID> = Set(savedSets.map { $0.id })
+        XCTAssertEqual(savedSetIDs, Set([originalSet.id, addedSet.id, retainedSet.id, otherRecord.sets[0].id]))
+        let savedValues = try verificationContext.fetch(FetchDescriptor<MetricValue>())
+        XCTAssertEqual(Set(savedValues.map(\.id)), [originalValue.id, addedValue.id, retainedValue.id, otherValue.id])
+        XCTAssertEqual(try XCTUnwrap(savedValues.first { $0.id == originalValue.id }).scaledValue, 10_000)
+        XCTAssertEqual(try XCTUnwrap(savedValues.first { $0.id == addedValue.id }).scaledValue, 15_000)
+        XCTAssertEqual(try XCTUnwrap(savedValues.first { $0.id == otherValue.id }).scaledValue, 40_000)
+    }
+
+    func testWorkoutDeletionRejectsSavedValueChangeAfterConfirmation() throws {
+        let schema = Schema(versionedSchema: MeleteSchemaV1.self)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("MeleteV1WorkoutDeletionSnapshot-\(UUID().uuidString).sqlite")
+        let configuration = ModelConfiguration("MeleteV1WorkoutDeletionSnapshot", schema: schema, url: url, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+        let metric = MetricDefinition(name: "負荷", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let value = MetricValue(metric: metric, scaledValue: 12_000)
+        let workout = Workout(day: .now, records: [ExerciseRecord(exercise: Exercise(name: "合成種目", metrics: [metric]), sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [value])])])
+        context.insert(workout)
+        try context.save()
+
+        let target = try WorkoutDeletion.captureTarget(workout: workout, in: context)
+        let externalContext = ModelContext(container)
+        let externalWorkout = try XCTUnwrap(externalContext.fetch(FetchDescriptor<Workout>()).first { $0.id == workout.id })
+        let externalValue = try XCTUnwrap(externalWorkout.records.first?.sets.first?.values.first)
+        externalValue.scaledValue = 13_000
+        try externalContext.save()
+        XCTAssertThrowsError(try WorkoutDeletion.delete(target, in: context)) { error in
+            guard case WorkoutSetDeletionError.changed = error else { return XCTFail("changedとして拒否する必要: \(error)") }
+        }
+        let verificationContext = ModelContext(container)
+        XCTAssertEqual(try verificationContext.fetch(FetchDescriptor<Workout>()).map(\.id), [workout.id])
+        XCTAssertEqual(try verificationContext.fetch(FetchDescriptor<MetricValue>()).first?.scaledValue, 13_000)
+    }
+}
+
+@MainActor
+final class WorkoutDeletionV2CaptureDirtyContextTests: XCTestCase {
+    func testCaptureDeletionTargetsRejectDirtyContextAsUnsavedAndPreserveSQLiteGraph() throws {
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteV2CaptureDirtyContext-\(UUID().uuidString).sqlite")
+        let configuration = ModelConfiguration(
+            "MeleteV2CaptureDirtyContext-\(UUID().uuidString)",
+            schema: schema,
+            url: storeURL,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+
+        let metric = MetricDefinition(name: "対象外の指標", unit: "回", allowsDecimal: false, isRequired: false, sortOrder: 0)
+        let exercise = Exercise(name: "合成種目", metrics: [metric])
+        let revision = MetricDefinitionRevision(
+            metricID: metric.id,
+            revision: 1,
+            name: metric.name,
+            unit: metric.unit,
+            allowsDecimal: metric.allowsDecimal,
+            isRequired: metric.isRequired,
+            sortOrder: metric.sortOrder
+        )
+        let value = MetricValue(metric: metric, scaledValue: 12_000)
+        let set = SetRecord(sortOrder: 1, values: [value])
+        let record = ExerciseRecord(exercise: exercise, sortOrder: 0, sets: [set])
+        let workout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [record])
+        context.insert(exercise)
+        context.insert(workout)
+        context.insert(revision)
+        let link = try MetricValueRevisionLinking.register(value: value, revision: revision, in: context)
+        try context.save()
+        XCTAssertFalse(context.hasChanges, "合成SQLite fixtureの保存後はclean")
+
+        metric.name = "未保存の指標名"
+        XCTAssertTrue(context.hasChanges)
+
+        let service = WorkoutWritingServiceV2(context: context)
+        XCTAssertThrowsError(try service.captureWorkoutDeletionTarget(workout: workout)) { error in
+            guard case WorkoutSetDeletionError.unsavedContext = error else {
+                return XCTFail("unsavedContextとして拒否する必要: \(error)")
+            }
+        }
+        XCTAssertThrowsError(try service.captureRecordDeletionTarget(workout: workout, record: record)) { error in
+            guard case WorkoutSetDeletionError.unsavedContext = error else {
+                return XCTFail("unsavedContextとして拒否する必要: \(error)")
+            }
+        }
+        XCTAssertThrowsError(try service.captureSetDeletionTarget(workout: workout, record: record, set: set)) { error in
+            guard case WorkoutSetDeletionError.unsavedContext = error else {
+                return XCTFail("unsavedContextとして拒否する必要: \(error)")
+            }
+        }
+
+        XCTAssertEqual(metric.name, "未保存の指標名", "capture拒否後も未保存変更をrollbackしない")
+        XCTAssertTrue(context.hasChanges, "capture拒否後もcontextのdirty状態を保持")
+        XCTAssertEqual(workout.records.map(\.id), [record.id])
+        XCTAssertEqual(record.sets.map(\.id), [set.id])
+        XCTAssertEqual(set.values.map(\.id), [value.id])
+        XCTAssertEqual(try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.id), [link.id])
     }
 }

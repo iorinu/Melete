@@ -1101,7 +1101,8 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
 
         let targetSet = try XCTUnwrap(oldRecord.sets.first { $0.sortOrder == 3 })
         let partiallyDeletedValueID = try XCTUnwrap(targetSet.values.first).id
-        try service.deleteSet(WorkoutSetDeletionTarget(workout: oldWorkout, record: oldRecord, set: targetSet))
+        let deletionTarget = try service.captureSetDeletionTarget(workout: oldWorkout, record: oldRecord, set: targetSet)
+        try service.deleteSet(deletionTarget)
 
         let reopened = try ModelContainer(for: v2Schema, migrationPlan: MeleteMigrationPlan.self, configurations: [v2Configuration])
         let reopenedContext = ModelContext(reopened)
@@ -1134,7 +1135,7 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         XCTAssertEqual(newWorkoutLink.revisionID, currentRevision.id)
 
         let reopenedService = WorkoutWritingServiceV2(context: reopenedContext)
-        try reopenedService.deleteWorkout(id: newWorkout.id)
+        try reopenedService.deleteWorkout(try reopenedService.captureWorkoutDeletionTarget(workout: newWorkout))
         let afterDeletion = ModelContext(reopened)
         XCTAssertNil(try afterDeletion.fetch(FetchDescriptor<Workout>()).first { $0.id == newWorkout.id })
         XCTAssertFalse(try afterDeletion.fetch(FetchDescriptor<MetricValueRevisionLink>()).contains { $0.valueID == newWorkoutValue.id })

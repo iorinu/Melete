@@ -73,7 +73,7 @@ struct MainView: View {
     @State private var editingMetricExercise: Exercise?
     @State private var metricEditingDrafts: [MetricDefinitionDraft]?
     @State private var showingWorkoutForm = false
-    @State private var pendingWorkoutDeletion: Workout?
+    @State private var pendingWorkoutDeletion: WorkoutDeletionTarget?
     @State private var editingWorkout: Workout?
     @State private var errorMessage: String?
     @State private var displayedMonth = Calendar(identifier: .gregorian).dateInterval(of: .month, for: .now)?.start ?? .now
@@ -146,7 +146,17 @@ struct MainView: View {
         .sheet(item: $editingWorkout) { workout in
             WorkoutValueEditForm(workout: workout, exercises: exercises, onSave: { day, drafts, additions in
                 saveWorkoutEdits(workout: workout, day: day, drafts: drafts, additions: additions)
-            }, onDeleteSet: { target in deleteWorkoutSet(target) }, onDeleteRecord: { target in deleteWorkoutRecord(target) })
+            }, onDeleteSet: { target in deleteWorkoutSet(target) }, captureSetDeletionTarget: { workout, record, set in
+                if storeMode == .isolatedV2Experimental {
+                    return try WorkoutWritingServiceV2(context: context).captureSetDeletionTarget(workout: workout, record: record, set: set)
+                }
+                return WorkoutSetDeletionTarget(workout: workout, record: record, set: set)
+            }, onDeleteRecord: { target in deleteWorkoutRecord(target) }, captureRecordDeletionTarget: { workout, record in
+                if storeMode == .isolatedV2Experimental {
+                    return try WorkoutWritingServiceV2(context: context).captureRecordDeletionTarget(workout: workout, record: record)
+                }
+                return WorkoutRecordDeletionTarget(workout: workout, record: record)
+            })
         }
         .alert("操作できませんでした", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) { errorMessage = nil }
@@ -155,8 +165,8 @@ struct MainView: View {
             Button("この運動を削除", role: .destructive) { confirmWorkoutDeletion() }
             Button("キャンセル", role: .cancel) { pendingWorkoutDeletion = nil }
         } message: {
-            if let workout = pendingWorkoutDeletion {
-                Text("対象日: \(Self.displayDay(workout.day))\nこの運動の全種目・セットが削除されます。削除した内容は元に戻せません。")
+            if let target = pendingWorkoutDeletion {
+                Text("対象日: \(Self.displayDay(target.workoutDay))\nこの運動の全種目・セットが削除されます。削除した内容は元に戻せません。")
             }
         }
     }
@@ -298,7 +308,15 @@ struct MainView: View {
                                     }
                                     .accessibilityIdentifier("editWorkout_\(workout.id.uuidString)")
                                     Button(role: .destructive) {
-                                        pendingWorkoutDeletion = workout
+                                        do {
+                                            if storeMode == .isolatedV2Experimental {
+                                                pendingWorkoutDeletion = try WorkoutWritingServiceV2(context: context).captureWorkoutDeletionTarget(workout: workout)
+                                            } else {
+                                                pendingWorkoutDeletion = try WorkoutDeletion.captureTarget(workout: workout, in: context)
+                                            }
+                                        } catch {
+                                            errorMessage = error.localizedDescription
+                                        }
                                     } label: {
                                         Label("削除", systemImage: "trash")
                                     }
@@ -641,11 +659,10 @@ struct MainView: View {
 
     private func confirmWorkoutDeletion() {
         guard let workout = pendingWorkoutDeletion else { return }
-        let workoutID = workout.id
         pendingWorkoutDeletion = nil
         do {
-            if storeMode == .isolatedV2Experimental { try WorkoutWritingServiceV2(context: context).deleteWorkout(id: workoutID) }
-            else { try WorkoutDeletion.delete(workoutID: workoutID, in: context) }
+            if storeMode == .isolatedV2Experimental { try WorkoutWritingServiceV2(context: context).deleteWorkout(workout) }
+            else { try WorkoutDeletion.delete(workout, in: context) }
         } catch {
             errorMessage = error.localizedDescription
         }

@@ -426,7 +426,9 @@ struct WorkoutValueEditForm: View {
     let exercises: [Exercise]
     var onSave: (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?
     var onDeleteSet: (WorkoutSetDeletionTarget) -> String?
+    var captureSetDeletionTarget: (Workout, ExerciseRecord, SetRecord) throws -> WorkoutSetDeletionTarget
     var onDeleteRecord: (WorkoutRecordDeletionTarget) -> String?
+    var captureRecordDeletionTarget: (Workout, ExerciseRecord) throws -> WorkoutRecordDeletionTarget
     @State private var drafts: [WorkoutValueEditDraft]
     @State private var day: Date
     @State private var validationError: String?
@@ -434,12 +436,14 @@ struct WorkoutValueEditForm: View {
     @State private var pendingSetDeletion: WorkoutSetDeletionTarget?
     @State private var pendingRecordDeletion: WorkoutRecordDeletionTarget?
 
-    init(workout: Workout, exercises: [Exercise], onSave: @escaping (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?, onDeleteSet: @escaping (WorkoutSetDeletionTarget) -> String? = { _ in "削除を利用できません。" }, onDeleteRecord: @escaping (WorkoutRecordDeletionTarget) -> String? = { _ in "削除を利用できません。" }) {
+    init(workout: Workout, exercises: [Exercise], onSave: @escaping (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?, onDeleteSet: @escaping (WorkoutSetDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureSetDeletionTarget: @escaping (Workout, ExerciseRecord, SetRecord) throws -> WorkoutSetDeletionTarget = { workout, record, set in WorkoutSetDeletionTarget(workout: workout, record: record, set: set) }, onDeleteRecord: @escaping (WorkoutRecordDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureRecordDeletionTarget: @escaping (Workout, ExerciseRecord) throws -> WorkoutRecordDeletionTarget = { workout, record in WorkoutRecordDeletionTarget(workout: workout, record: record) }) {
         self.workout = workout
         self.exercises = exercises
         self.onSave = onSave
         self.onDeleteSet = onDeleteSet
+        self.captureSetDeletionTarget = captureSetDeletionTarget
         self.onDeleteRecord = onDeleteRecord
+        self.captureRecordDeletionTarget = captureRecordDeletionTarget
         _drafts = State(initialValue: WorkoutValueEditing.drafts(for: workout))
         let storedDay = WorkoutValueEditing.date(from: workout.day)
         _day = State(initialValue: storedDay ?? Calendar.current.startOfDay(for: .now))
@@ -459,13 +463,15 @@ struct WorkoutValueEditForm: View {
                 ForEach(workout.records.sorted { $0.sortOrder < $1.sortOrder }) { record in
                     Section(record.exerciseName) {
                         Button("この種目記録を削除", role: .destructive) {
-                            pendingRecordDeletion = WorkoutRecordDeletionTarget(workout: workout, record: record)
+                            do { pendingRecordDeletion = try captureRecordDeletionTarget(workout, record) }
+                            catch { validationError = error.localizedDescription }
                         }
                         ForEach(record.sets.sorted { $0.sortOrder < $1.sortOrder }) { set in
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("セット \(set.sortOrder)").font(.headline)
                                 Button("このセットを削除", role: .destructive) {
-                                    pendingSetDeletion = WorkoutSetDeletionTarget(workout: workout, record: record, set: set)
+                                    do { pendingSetDeletion = try captureSetDeletionTarget(workout, record, set) }
+                                    catch { validationError = error.localizedDescription }
                                 }
                                 ForEach(drafts.indices.filter { index in
                                     set.values.contains { $0.id == drafts[index].valueID }

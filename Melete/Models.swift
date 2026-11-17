@@ -459,17 +459,65 @@ enum MetricDefinitionEditingV2Error: LocalizedError {
 }
 
 enum WorkoutDeletion {
-    static func delete(workoutID: UUID, in context: ModelContext) throws {
+    static func captureTarget(workout: Workout, in context: ModelContext) throws -> WorkoutDeletionTarget {
+        guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        let workoutID = workout.id
         let descriptor = FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })
-        guard let workout = try context.fetch(descriptor).first else {
-            throw WorkoutDeletionError.notFound
-        }
+        let matches = try context.fetch(descriptor)
+        guard matches.count == 1, let current = matches.first,
+              WorkoutRecordDeletionSnapshot.hasUniqueIDs(current), current.day == workout.day,
+              current.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString })
+                == workout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else { throw WorkoutSetDeletionError.changed }
+        let readContext = ModelContext(context.container)
+        let saved = try readContext.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
+        guard saved.count == 1, let latest = saved.first, WorkoutRecordDeletionSnapshot.hasUniqueIDs(latest),
+              latest.day == current.day, latest.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString })
+                == current.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else { throw WorkoutSetDeletionError.changed }
+        return WorkoutDeletionTarget(workoutID: current.id, workoutDay: current.day,
+            workoutRecords: current.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }, revisionLinks: [])
+    }
+
+    static func delete(_ target: WorkoutDeletionTarget, in context: ModelContext) throws {
+        guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        let workoutID = target.workoutID
+        let descriptor = FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })
+        let matches = try context.fetch(descriptor)
+        guard matches.count == 1, let workout = matches.first,
+              WorkoutRecordDeletionSnapshot.hasUniqueIDs(workout), workout.day == target.workoutDay,
+              workout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == target.workoutRecords else { throw WorkoutSetDeletionError.changed }
+        let readContext = ModelContext(context.container)
+        let latest = try readContext.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
+        guard latest.count == 1, let saved = latest.first,
+              WorkoutRecordDeletionSnapshot.hasUniqueIDs(saved), saved.day == target.workoutDay,
+              saved.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == target.workoutRecords else { throw WorkoutSetDeletionError.changed }
+        // 照合後からsaveまでのTOCTOU競合は、この確認だけでは防げない。
         context.delete(workout)
         do {
             try context.save()
         } catch {
             context.rollback()
             throw error
+        }
+    }
+}
+
+private enum WorkoutRecordDeletionSnapshot {
+    static func hasUniqueIDs(_ workout: Workout) -> Bool {
+        let records = workout.records, sets = records.flatMap(\.sets), values = sets.flatMap(\.values)
+        return Set(records.map(\.id)).count == records.count && Set(sets.map(\.id)).count == sets.count
+            && Set(values.map(\.id)).count == values.count
+            && records.allSatisfy { record in Set(record.sets.map(\.id)).count == record.sets.count
+                && record.sets.allSatisfy { Set($0.values.map(\.id)).count == $0.values.count } }
+    }
+
+    // 削除を適用するcontextとは分けて、永続状態が確認時snapshotと一致するか調べる。
+    static func verifyPersistedState(workoutID: UUID, day: String, records: [WorkoutRecordSnapshot], in context: ModelContext) throws {
+        let readContext = ModelContext(context.container)
+        let matches = try readContext.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
+        guard matches.count == 1, let saved = matches.first, hasUniqueIDs(saved),
+              saved.day == day,
+              saved.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == records else {
+            throw WorkoutSetDeletionError.changed
         }
     }
 }
@@ -520,6 +568,7 @@ struct WorkoutSetDeletionTarget: Equatable {
     let recordSnapshot: WorkoutRecordSnapshot
     let workoutRecords: [WorkoutRecordSnapshot]
     let workoutDay: String
+    let revisionLinks: [WorkoutRevisionLinkSnapshot]?
 
     init(workout: Workout, record: ExerciseRecord, set: SetRecord) {
         workoutID = workout.id
@@ -528,6 +577,43 @@ struct WorkoutSetDeletionTarget: Equatable {
         recordSnapshot = WorkoutRecordSnapshot(record)
         workoutRecords = workout.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
         workoutDay = workout.day
+        revisionLinks = nil
+    }
+
+    init(workout: Workout, record: ExerciseRecord, set: SetRecord, revisionLinks: [WorkoutRevisionLinkSnapshot]) {
+        workoutID = workout.id
+        recordID = record.id
+        setID = set.id
+        recordSnapshot = WorkoutRecordSnapshot(record)
+        workoutRecords = workout.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        workoutDay = workout.day
+        self.revisionLinks = revisionLinks
+    }
+}
+
+struct WorkoutRevisionLinkSnapshot: Equatable {
+    let id: UUID
+    let valueID: UUID
+    let revisionID: UUID
+
+    init(_ link: MetricValueRevisionLink) {
+        id = link.id
+        valueID = link.valueID
+        revisionID = link.revisionID
+    }
+}
+
+struct WorkoutDeletionTarget: Equatable {
+    let workoutID: UUID
+    let workoutDay: String
+    let workoutRecords: [WorkoutRecordSnapshot]
+    let revisionLinks: [WorkoutRevisionLinkSnapshot]
+
+    fileprivate init(workoutID: UUID, workoutDay: String, workoutRecords: [WorkoutRecordSnapshot], revisionLinks: [WorkoutRevisionLinkSnapshot]) {
+        self.workoutID = workoutID
+        self.workoutDay = workoutDay
+        self.workoutRecords = workoutRecords
+        self.revisionLinks = revisionLinks
     }
 }
 
@@ -536,11 +622,20 @@ struct WorkoutRecordDeletionTarget: Equatable {
     let workoutDay: String
     let record: WorkoutRecordSnapshot
     let workoutRecords: [WorkoutRecordSnapshot]
+    let revisionLinks: [WorkoutRevisionLinkSnapshot]?
 
     init(workout: Workout, record: ExerciseRecord) {
         workoutID = workout.id; workoutDay = workout.day
         self.record = WorkoutRecordSnapshot(record)
         workoutRecords = workout.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        revisionLinks = nil
+    }
+
+    init(workout: Workout, record: ExerciseRecord, revisionLinks: [WorkoutRevisionLinkSnapshot]) {
+        workoutID = workout.id; workoutDay = workout.day
+        self.record = WorkoutRecordSnapshot(record)
+        workoutRecords = workout.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        self.revisionLinks = revisionLinks
     }
 }
 
@@ -549,15 +644,19 @@ struct WorkoutRecordDeletionTarget: Equatable {
         guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
         let workoutID = target.workoutID
         let descriptor = FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })
-        guard let workout = try context.fetch(descriptor).first,
-              workout.day == target.workoutDay,
+        let matches = try context.fetch(descriptor)
+        guard matches.count == 1, let workout = matches.first,
+              WorkoutRecordDeletionSnapshot.hasUniqueIDs(workout), workout.day == target.workoutDay,
               let record = workout.records.first(where: { $0.id == target.recordID }),
               workout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == target.workoutRecords,
               WorkoutRecordSnapshot(record) == target.recordSnapshot,
+              record.sets.filter({ $0.id == target.setID }).count == 1,
               let set = record.sets.first(where: { $0.id == target.setID }) else {
             throw WorkoutSetDeletionError.changed
         }
         guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        try WorkoutRecordDeletionSnapshot.verifyPersistedState(workoutID: workoutID, day: target.workoutDay, records: target.workoutRecords, in: context)
+        // 永続状態の照合後からsaveまでのTOCTOU競合は、この確認だけでは防げない。
 
         if record.sets.count == 1 {
             workout.records.removeAll { $0.id == record.id }
@@ -586,11 +685,16 @@ struct WorkoutRecordDeletionTarget: Equatable {
         guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
         let workoutID = target.workoutID
         let descriptor = FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })
-        guard let workout = try context.fetch(descriptor).first, workout.day == target.workoutDay,
+        let matches = try context.fetch(descriptor)
+        guard matches.count == 1, let workout = matches.first,
+              WorkoutRecordDeletionSnapshot.hasUniqueIDs(workout), workout.day == target.workoutDay,
               workout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == target.workoutRecords,
+              workout.records.filter({ $0.id == target.record.id }).count == 1,
               let record = workout.records.first(where: { $0.id == target.record.id }),
               WorkoutRecordSnapshot(record) == target.record else { throw WorkoutSetDeletionError.changed }
         guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        try WorkoutRecordDeletionSnapshot.verifyPersistedState(workoutID: workoutID, day: target.workoutDay, records: target.workoutRecords, in: context)
+        // 永続状態の照合後からsaveまでのTOCTOU競合は、この確認だけでは防げない。
         workout.records.removeAll { $0.id == record.id }
         record.workout = nil
         context.delete(record)
@@ -989,18 +1093,6 @@ enum MetricValueRevisionLinking {
 }
 
 @MainActor enum WorkoutDeletionV2 {
-    private struct RevisionLinkSnapshot: Equatable {
-        let id: UUID
-        let valueID: UUID
-        let revisionID: UUID
-
-        init(_ link: MetricValueRevisionLink) {
-            id = link.id
-            valueID = link.valueID
-            revisionID = link.revisionID
-        }
-    }
-
     private static func hasUniqueIDs(_ workout: Workout) -> Bool {
         let records = workout.records
         let sets = records.flatMap(\.sets)
@@ -1025,9 +1117,9 @@ enum MetricValueRevisionLinking {
         }
 
         let latestLinks = try readContext.fetch(FetchDescriptor<MetricValueRevisionLink>())
-            .filter { affectedValueIDs.contains($0.valueID) }.map(RevisionLinkSnapshot.init)
+            .filter { affectedValueIDs.contains($0.valueID) }.map(WorkoutRevisionLinkSnapshot.init)
         let contextLinks = try context.fetch(FetchDescriptor<MetricValueRevisionLink>())
-            .filter { affectedValueIDs.contains($0.valueID) }.map(RevisionLinkSnapshot.init)
+            .filter { affectedValueIDs.contains($0.valueID) }.map(WorkoutRevisionLinkSnapshot.init)
         guard Set(latestLinks.map(\.id)).count == latestLinks.count,
               Set(latestLinks.map(\.valueID)).count == latestLinks.count,
               Set(contextLinks.map(\.id)).count == contextLinks.count,
@@ -1038,22 +1130,71 @@ enum MetricValueRevisionLinking {
         }
     }
 
-    static func delete(workoutID: UUID, in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
+    private static func deleteCaptured(_ target: WorkoutDeletionTarget, in context: ModelContext, persist: (ModelContext) throws -> Void) throws {
         guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        guard Set(target.workoutRecords.map(\.id)).count == target.workoutRecords.count,
+              Set(target.revisionLinks.map(\.id)).count == target.revisionLinks.count,
+              Set(target.revisionLinks.map(\.valueID)).count == target.revisionLinks.count else { throw WorkoutSetDeletionError.changed }
+        let workoutID = target.workoutID
         let matches = try context.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
-        guard matches.count == 1, let workout = matches.first else { throw WorkoutDeletionError.notFound }
-        guard hasUniqueIDs(workout) else { throw WorkoutSetDeletionError.changed }
+        guard matches.count == 1, let workout = matches.first, hasUniqueIDs(workout),
+              workout.day == target.workoutDay,
+              workout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == target.workoutRecords else { throw WorkoutSetDeletionError.changed }
         let values = workout.records.flatMap(\.sets).flatMap(\.values)
-        let recordsSnapshot = workout.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
-        try verifyPersistedState(workoutID: workoutID, in: context, expectedRecords: recordsSnapshot, expectedDay: workout.day, affectedValueIDs: Set(values.map(\.id)))
-        // この永続状態確認後からsaveまでのTOCTOU競合は、この確認だけでは防げない。
+        let ids = Set(values.map(\.id))
+        let contextLinks = try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).filter { ids.contains($0.valueID) }.map(WorkoutRevisionLinkSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        guard contextLinks == target.revisionLinks else { throw WorkoutSetDeletionError.changed }
+        let readContext = ModelContext(context.container)
+        let saved = try readContext.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
+        guard saved.count == 1, let latest = saved.first, hasUniqueIDs(latest), latest.day == target.workoutDay,
+              latest.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == target.workoutRecords else { throw WorkoutSetDeletionError.changed }
+        let savedLinks = try readContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).filter { ids.contains($0.valueID) }.map(WorkoutRevisionLinkSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        guard Set(savedLinks.map(\.id)).count == savedLinks.count, Set(savedLinks.map(\.valueID)).count == savedLinks.count,
+              savedLinks == target.revisionLinks else { throw WorkoutSetDeletionError.changed }
+        // 照合後からsaveまでのTOCTOU競合は、この確認だけでは防げない。
         _ = try MetricValueRevisionLinking.removeLinks(for: values, in: context)
         context.delete(workout)
         do { try persist(context) } catch { context.rollback(); throw error }
     }
 
+    static func captureWorkoutDeletionTarget(workout: Workout, in context: ModelContext) throws -> WorkoutDeletionTarget {
+        guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        guard hasUniqueIDs(workout) else { throw WorkoutSetDeletionError.changed }
+        let workoutID = workout.id
+        let contextMatches = try context.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
+        guard contextMatches.count == 1, let current = contextMatches.first, hasUniqueIDs(current), current.day == workout.day,
+              current.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString })
+                == workout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else { throw WorkoutSetDeletionError.changed }
+        let valueIDs = Set(workout.records.flatMap(\.sets).flatMap(\.values).map(\.id))
+        let links = try context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+            .filter { valueIDs.contains($0.valueID) }
+            .map(WorkoutRevisionLinkSnapshot.init)
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+        guard Set(links.map(\.id)).count == links.count, Set(links.map(\.valueID)).count == links.count else { throw WorkoutSetDeletionError.changed }
+        let readContext = ModelContext(context.container)
+        let saved = try readContext.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
+        guard saved.count == 1, let latest = saved.first, hasUniqueIDs(latest), latest.day == current.day,
+              latest.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString })
+                == current.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else { throw WorkoutSetDeletionError.changed }
+        let savedLinks = try readContext.fetch(FetchDescriptor<MetricValueRevisionLink>()).filter { valueIDs.contains($0.valueID) }
+            .map(WorkoutRevisionLinkSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        guard Set(savedLinks.map(\.id)).count == savedLinks.count, Set(savedLinks.map(\.valueID)).count == savedLinks.count,
+              savedLinks == links else { throw WorkoutSetDeletionError.changed }
+        return WorkoutDeletionTarget(
+            workoutID: workout.id,
+            workoutDay: workout.day,
+            workoutRecords: workout.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString },
+            revisionLinks: links
+        )
+    }
+
+    static func delete(_ target: WorkoutDeletionTarget, in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
+        try deleteCaptured(target, in: context, persist: persist)
+    }
+
     static func deleteSet(_ target: WorkoutSetDeletionTarget, in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
         guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        guard let confirmedLinks = target.revisionLinks else { throw WorkoutSetDeletionError.changed }
         let workoutID = target.workoutID
         let matches = try context.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
         guard matches.count == 1, let workout = matches.first,
@@ -1063,7 +1204,22 @@ enum MetricValueRevisionLinking {
               let record = workout.records.first(where: { $0.id == target.recordID }),
               WorkoutRecordSnapshot(record) == target.recordSnapshot,
               let set = record.sets.first(where: { $0.id == target.setID }) else { throw WorkoutSetDeletionError.changed }
-        try verifyPersistedState(workoutID: workoutID, in: context, expectedRecords: target.workoutRecords, expectedDay: target.workoutDay, affectedValueIDs: Set(set.values.map(\.id)))
+        let affectedValueIDs = Set(set.values.map(\.id))
+        try verifyPersistedState(workoutID: workoutID, in: context, expectedRecords: target.workoutRecords, expectedDay: target.workoutDay, affectedValueIDs: affectedValueIDs)
+        let currentLinks = try context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+            .filter { affectedValueIDs.contains($0.valueID) }
+            .map(WorkoutRevisionLinkSnapshot.init)
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+        let persistedContext = ModelContext(context.container)
+        let latestLinks = try persistedContext.fetch(FetchDescriptor<MetricValueRevisionLink>())
+            .filter { affectedValueIDs.contains($0.valueID) }
+            .map(WorkoutRevisionLinkSnapshot.init)
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+        guard Set(currentLinks.map(\.id)).count == currentLinks.count,
+              Set(currentLinks.map(\.valueID)).count == currentLinks.count,
+              Set(latestLinks.map(\.id)).count == latestLinks.count,
+              Set(latestLinks.map(\.valueID)).count == latestLinks.count,
+              currentLinks == confirmedLinks, latestLinks == confirmedLinks else { throw WorkoutSetDeletionError.changed }
         // この永続状態確認後からsaveまでのTOCTOU競合は、この確認だけでは防げない。
         _ = try MetricValueRevisionLinking.removeLinks(for: set.values, in: context)
         if record.sets.count == 1 { workout.records.removeAll { $0.id == record.id }; context.delete(record) }
@@ -1072,8 +1228,34 @@ enum MetricValueRevisionLinking {
         do { try persist(context) } catch { context.rollback(); throw error }
     }
 
+    static func captureSetDeletionTarget(workout: Workout, record: ExerciseRecord, set: SetRecord, in context: ModelContext) throws -> WorkoutSetDeletionTarget {
+        guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        guard hasUniqueIDs(workout),
+              workout.records.filter({ $0.id == record.id }).count == 1,
+              record.sets.filter({ $0.id == set.id }).count == 1 else { throw WorkoutSetDeletionError.changed }
+        let valueIDs = Set(set.values.map(\.id))
+        let links = try context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+            .filter { valueIDs.contains($0.valueID) }
+            .map(WorkoutRevisionLinkSnapshot.init)
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+        return WorkoutSetDeletionTarget(workout: workout, record: record, set: set, revisionLinks: links)
+    }
+
+    static func captureRecordDeletionTarget(workout: Workout, record: ExerciseRecord, in context: ModelContext) throws -> WorkoutRecordDeletionTarget {
+        guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        guard hasUniqueIDs(workout),
+              workout.records.filter({ $0.id == record.id }).count == 1 else { throw WorkoutSetDeletionError.changed }
+        let valueIDs = Set(record.sets.flatMap(\.values).map(\.id))
+        let links = try context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+            .filter { valueIDs.contains($0.valueID) }
+            .map(WorkoutRevisionLinkSnapshot.init)
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+        return WorkoutRecordDeletionTarget(workout: workout, record: record, revisionLinks: links)
+    }
+
     static func deleteRecord(_ target: WorkoutRecordDeletionTarget, in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
         guard !context.hasChanges else { throw WorkoutSetDeletionError.unsavedContext }
+        guard let confirmedLinks = target.revisionLinks else { throw WorkoutSetDeletionError.changed }
         let workoutID = target.workoutID
         let matches = try context.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
         guard matches.count == 1, let workout = matches.first,
@@ -1081,7 +1263,22 @@ enum MetricValueRevisionLinking {
               workout.day == target.workoutDay,
               workout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) == target.workoutRecords,
               let record = workout.records.first(where: { $0.id == target.record.id }), WorkoutRecordSnapshot(record) == target.record else { throw WorkoutSetDeletionError.changed }
-        try verifyPersistedState(workoutID: workoutID, in: context, expectedRecords: target.workoutRecords, expectedDay: target.workoutDay, affectedValueIDs: Set(record.sets.flatMap(\.values).map(\.id)))
+        let affectedValueIDs = Set(record.sets.flatMap(\.values).map(\.id))
+        try verifyPersistedState(workoutID: workoutID, in: context, expectedRecords: target.workoutRecords, expectedDay: target.workoutDay, affectedValueIDs: affectedValueIDs)
+        let currentLinks = try context.fetch(FetchDescriptor<MetricValueRevisionLink>())
+            .filter { affectedValueIDs.contains($0.valueID) }
+            .map(WorkoutRevisionLinkSnapshot.init)
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+        let persistedContext = ModelContext(context.container)
+        let latestLinks = try persistedContext.fetch(FetchDescriptor<MetricValueRevisionLink>())
+            .filter { affectedValueIDs.contains($0.valueID) }
+            .map(WorkoutRevisionLinkSnapshot.init)
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+        guard Set(currentLinks.map(\.id)).count == currentLinks.count,
+              Set(currentLinks.map(\.valueID)).count == currentLinks.count,
+              Set(latestLinks.map(\.id)).count == latestLinks.count,
+              Set(latestLinks.map(\.valueID)).count == latestLinks.count,
+              currentLinks == confirmedLinks, latestLinks == confirmedLinks else { throw WorkoutSetDeletionError.changed }
         // この永続状態確認後からsaveまでのTOCTOU競合は、この確認だけでは防げない。
         _ = try MetricValueRevisionLinking.removeLinks(for: record.sets.flatMap(\.values), in: context)
         workout.records.removeAll { $0.id == record.id }; context.delete(record)
@@ -1256,12 +1453,24 @@ enum MeleteMigrationPlan: SchemaMigrationPlan {
         try WorkoutDeletionV2.deleteSet(target, in: context)
     }
 
+    func captureSetDeletionTarget(workout: Workout, record: ExerciseRecord, set: SetRecord) throws -> WorkoutSetDeletionTarget {
+        try WorkoutDeletionV2.captureSetDeletionTarget(workout: workout, record: record, set: set, in: context)
+    }
+
+    func captureRecordDeletionTarget(workout: Workout, record: ExerciseRecord) throws -> WorkoutRecordDeletionTarget {
+        try WorkoutDeletionV2.captureRecordDeletionTarget(workout: workout, record: record, in: context)
+    }
+
     func deleteRecord(_ target: WorkoutRecordDeletionTarget) throws {
         try WorkoutDeletionV2.deleteRecord(target, in: context)
     }
 
-    func deleteWorkout(id: UUID) throws {
-        try WorkoutDeletionV2.delete(workoutID: id, in: context)
+    func captureWorkoutDeletionTarget(workout: Workout) throws -> WorkoutDeletionTarget {
+        try WorkoutDeletionV2.captureWorkoutDeletionTarget(workout: workout, in: context)
+    }
+
+    func deleteWorkout(_ target: WorkoutDeletionTarget) throws {
+        try WorkoutDeletionV2.delete(target, in: context)
     }
 }
 
