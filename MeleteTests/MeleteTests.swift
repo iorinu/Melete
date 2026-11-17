@@ -2607,6 +2607,91 @@ final class MeleteTests: XCTestCase {
     }
 }
 
+@MainActor
+final class WorkoutRecordDeletionV2PersistenceTests: XCTestCase {
+    func testV2DeleteRecordThroughServicePersistsPartialAndLastRecordCascadesInSQLite() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MeleteV2RecordDeletionPersistence-\(UUID().uuidString).sqlite")
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let configuration = ModelConfiguration("MeleteV2RecordDeletionPersistence", schema: schema, url: storeURL, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+
+        let metricA = MetricDefinition(name: "負荷A", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let metricB = MetricDefinition(name: "負荷B", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let exerciseA = Exercise(name: "合成種目A", metrics: [metricA])
+        let exerciseB = Exercise(name: "合成種目B", metrics: [metricB])
+        let revisionA = MetricDefinitionRevision(metricID: metricA.id, revision: 3, name: "負荷A", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+        let revisionB = MetricDefinitionRevision(metricID: metricB.id, revision: 1, name: "負荷B", unit: "kg", allowsDecimal: true, isRequired: false, sortOrder: 0)
+
+        func makeSet(_ order: Int, _ amount: Int64, metric: MetricDefinition) -> SetRecord {
+            SetRecord(sortOrder: order, values: [MetricValue(metric: metric, scaledValue: amount)])
+        }
+        let removedRecord = ExerciseRecord(exercise: exerciseA, sortOrder: 0, sets: [makeSet(1, 11_000, metric: metricA), makeSet(2, 12_000, metric: metricA)])
+        let retainedRecord = ExerciseRecord(exercise: exerciseB, sortOrder: 1, sets: [makeSet(1, 8_000, metric: metricB), makeSet(2, 9_000, metric: metricB)])
+        let targetWorkout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [removedRecord, retainedRecord])
+        let otherRecord = ExerciseRecord(exercise: exerciseA, sortOrder: 0, sets: [makeSet(1, 20_000, metric: metricA), makeSet(2, 21_000, metric: metricA)])
+        let otherWorkout = Workout(day: Date(timeIntervalSince1970: 1_699_000_000), records: [otherRecord])
+        context.insert(exerciseA)
+        context.insert(exerciseB)
+        context.insert(targetWorkout); context.insert(otherWorkout); context.insert(revisionA); context.insert(revisionB)
+
+        let targetWorkoutID = targetWorkout.id
+        let retainedRecordID = retainedRecord.id
+        let otherWorkoutID = otherWorkout.id
+        let otherRecordID = otherRecord.id
+        let removedSetIDs = Set(removedRecord.sets.map(\.id))
+        let retainedSetIDs = Set(retainedRecord.sets.map(\.id))
+        let otherSetIDs = Set(otherRecord.sets.map(\.id))
+        let removedValues = removedRecord.sets.flatMap(\.values)
+        let retainedValues = retainedRecord.sets.flatMap(\.values)
+        let otherValues = otherRecord.sets.flatMap(\.values)
+        for value in removedValues + otherValues { _ = try MetricValueRevisionLinking.register(value: value, revision: revisionA, in: context) }
+        for value in retainedValues { _ = try MetricValueRevisionLinking.register(value: value, revision: revisionB, in: context) }
+        try context.save()
+
+        let removedValueIDs = Set(removedValues.map(\.id))
+        let retainedSnapshots = retainedValues.map(WorkoutValueSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        let otherSnapshots = otherValues.map(WorkoutValueSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+        let linkIDsByValue = Dictionary(uniqueKeysWithValues: try context.fetch(FetchDescriptor<MetricValueRevisionLink>()).map { ($0.valueID, $0.id) })
+        let revisionIDs = Set([revisionA.id, revisionB.id])
+
+        let service = WorkoutWritingServiceV2(context: context)
+        try service.deleteRecord(WorkoutRecordDeletionTarget(workout: targetWorkout, record: removedRecord))
+
+        let afterPartialContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let afterPartial = ModelContext(afterPartialContainer)
+        let partialWorkouts = try afterPartial.fetch(FetchDescriptor<Workout>())
+        XCTAssertEqual(Set(partialWorkouts.map(\.id)), Set([targetWorkoutID, otherWorkoutID]))
+        let partialTarget = try XCTUnwrap(partialWorkouts.first { $0.id == targetWorkoutID })
+        XCTAssertEqual(partialTarget.records.map(\.id), [retainedRecordID])
+        XCTAssertEqual(Set(try afterPartial.fetch(FetchDescriptor<ExerciseRecord>()).map(\.id)), Set([retainedRecordID, otherRecordID]))
+        XCTAssertEqual(Set(try afterPartial.fetch(FetchDescriptor<SetRecord>()).map(\.id)), retainedSetIDs.union(otherSetIDs))
+        let partialValues = try afterPartial.fetch(FetchDescriptor<MetricValue>())
+        XCTAssertEqual(Set(partialValues.map(\.id)), Set(retainedValues.map(\.id) + otherValues.map(\.id)))
+        XCTAssertEqual(partialValues.map(WorkoutValueSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }, (retainedSnapshots + otherSnapshots).sorted { $0.id.uuidString < $1.id.uuidString })
+        let partialLinks = try afterPartial.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(Set(partialLinks.map(\.id)), Set(retainedValues.map { linkIDsByValue[$0.id]! } + otherValues.map { linkIDsByValue[$0.id]! }))
+        XCTAssertFalse(partialLinks.contains { removedValueIDs.contains($0.valueID) })
+        XCTAssertEqual(Set(try afterPartial.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id)), revisionIDs)
+
+        let lastTarget = try XCTUnwrap(partialTarget.records.first { $0.id == retainedRecordID })
+        try WorkoutWritingServiceV2(context: afterPartial).deleteRecord(WorkoutRecordDeletionTarget(workout: partialTarget, record: lastTarget))
+
+        let afterLastContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let afterLast = ModelContext(afterLastContainer)
+        XCTAssertEqual(try afterLast.fetch(FetchDescriptor<Workout>()).map(\.id), [otherWorkoutID])
+        XCTAssertEqual(try afterLast.fetch(FetchDescriptor<ExerciseRecord>()).map(\.id), [otherRecordID])
+        XCTAssertEqual(Set(try afterLast.fetch(FetchDescriptor<SetRecord>()).map(\.id)), otherSetIDs)
+        XCTAssertEqual(try afterLast.fetch(FetchDescriptor<MetricValue>()).map(\.id).sorted { $0.uuidString < $1.uuidString }, otherValues.map(\.id).sorted { $0.uuidString < $1.uuidString })
+        XCTAssertEqual(try afterLast.fetch(FetchDescriptor<MetricValue>()).map(WorkoutValueSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }, otherSnapshots)
+        XCTAssertEqual(Set(try afterLast.fetch(FetchDescriptor<MetricValueRevisionLink>()).map(\.id)), Set(otherValues.map { linkIDsByValue[$0.id]! }))
+        XCTAssertEqual(Set(try afterLast.fetch(FetchDescriptor<MetricDefinitionRevision>()).map(\.id)), revisionIDs)
+        XCTAssertFalse(try afterLast.fetch(FetchDescriptor<Workout>()).contains { $0.id == targetWorkoutID })
+        XCTAssertTrue(removedSetIDs.isDisjoint(with: Set(try afterLast.fetch(FetchDescriptor<SetRecord>()).map(\.id))))
+    }
+}
+
 // 移行実験専用モデル。実運用のMeleteSchemaV1と同名の永続モデル名を使わず、
 // 実運用スキーマやfixtureを変更せずにSwiftDataの移行機構を隔離して調べる。
 enum RevisionSpikeSchemaV1: VersionedSchema {
