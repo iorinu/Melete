@@ -1100,7 +1100,7 @@ final class MeleteTests: XCTestCase {
 
             func saveEdit(unit: String, allowsDecimal: Bool, isRequired: Bool) throws {
                 let currentExercise = try XCTUnwrap(context.fetch(FetchDescriptor<Exercise>()).first { $0.id == exerciseID })
-                var drafts = MetricDefinitionEditing.draft(for: currentExercise)
+                var drafts = try MetricDefinitionEditingV2.draft(for: currentExercise, in: context)
                 drafts[0].unit = unit
                 drafts[0].allowsDecimal = allowsDecimal
                 drafts[0].isRequired = isRequired

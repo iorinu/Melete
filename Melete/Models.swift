@@ -34,6 +34,8 @@ struct MetricDefinitionDraft: Identifiable {
     var allowsDecimal: Bool
     var isRequired: Bool
     var isActive: Bool
+    // nilはV1 draftまたはV2 baseline未取得。履歴なしはnoHistoryで明示する。
+    var historyBaseline: MetricDefinitionHistoryBaseline?
 
     init(name: String, unit: String, allowsDecimal: Bool, isRequired: Bool, isActive: Bool = true) {
         id = UUID()
@@ -43,6 +45,7 @@ struct MetricDefinitionDraft: Identifiable {
         self.allowsDecimal = allowsDecimal
         self.isRequired = isRequired
         self.isActive = isActive
+        historyBaseline = nil
     }
 
     init(existing metric: MetricDefinition) {
@@ -53,7 +56,13 @@ struct MetricDefinitionDraft: Identifiable {
         allowsDecimal = metric.allowsDecimal
         isRequired = metric.isRequired
         isActive = metric.isActive
+        historyBaseline = nil
     }
+}
+
+enum MetricDefinitionHistoryBaseline: Equatable {
+    case latestRevision(UUID)
+    case noHistory
 }
 
 struct MetricDefinitionSnapshot: Equatable {
@@ -207,8 +216,43 @@ enum MetricDefinitionEditingError: LocalizedError {
     }
 }
 
-// V2の既存項目だけを編集する保存境界。UIからはまだ呼び出さない。
+// V2実験ストアの既存項目編集境界。通常ストアからは呼び出さない。
 @MainActor enum MetricDefinitionEditingV2 {
+    private static func hasUniqueRevisionNumbers(_ revisions: [MetricDefinitionRevision]) -> Bool {
+        Set(revisions.map(\.revision)).count == revisions.count
+    }
+
+    static func draft(for exercise: Exercise, in context: ModelContext) throws -> [MetricDefinitionDraft] {
+        guard !context.hasChanges else { throw MetricDefinitionEditingV2Error.unsavedContext }
+        let readContext = ModelContext(context.container)
+        let exerciseID = exercise.id
+        let exercises = try readContext.fetch(FetchDescriptor<Exercise>(predicate: #Predicate { $0.id == exerciseID }))
+        guard exercises.count == 1, let latestExercise = exercises.first,
+              latestExercise.persistentModelID == exercise.persistentModelID,
+              latestExercise.metrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString })
+                == exercise.metrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else {
+            throw MetricDefinitionEditingV2Error.changed
+        }
+        let history = try readContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        var drafts = MetricDefinitionEditing.draft(for: exercise)
+        for index in drafts.indices {
+            let revisions = history.filter { $0.metricID == drafts[index].id }
+            guard hasUniqueRevisionNumbers(revisions) else {
+                throw MetricValueRevisionLinkingError.duplicateRevision
+            }
+            if let latest = revisions.max(by: { $0.revision < $1.revision }) {
+                guard let metric = latestExercise.metrics.first(where: { $0.id == drafts[index].id }),
+                      MetricValueRevisionLinking.matchesSnapshot(metric, revision: latest) else {
+                    throw MetricValueRevisionLinkingError.snapshotMismatch
+                }
+                drafts[index].historyBaseline = .latestRevision(latest.id)
+            } else {
+                drafts[index].historyBaseline = .noHistory
+            }
+        }
+        return drafts
+    }
+
     static func save(_ drafts: [MetricDefinitionDraft], for exercise: Exercise, in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
         guard !context.hasChanges else { throw MetricDefinitionEditingV2Error.unsavedContext }
 
@@ -236,7 +280,7 @@ enum MetricDefinitionEditingError: LocalizedError {
                 == latestMetrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else {
             throw MetricDefinitionEditingV2Error.changed
         }
-        // 検証後からsaveまでに別contextが更新するTOCTOU競合は、この確認では解消しない。
+        // 検証後からsaveまでのTOCTOU競合、および同時保存同士の直列化・排他は未解決。この確認だけでは防げない。
         let metrics = storedExercise.metrics
         let metricIDs = metrics.map(\.id)
         guard Set(metricIDs).count == metricIDs.count else { throw MetricDefinitionEditingV2Error.changed }
@@ -273,7 +317,19 @@ enum MetricDefinitionEditingError: LocalizedError {
             throw MetricDefinitionEditingError.sortOrderOverflow
         }
 
-        let history = try context.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        let history = try readContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
+        let historyByMetric = Dictionary(grouping: history, by: \.metricID)
+        guard existingDrafts.allSatisfy({ draft in
+            guard let baseline = draft.historyBaseline else { return false }
+            let revisions = historyByMetric[draft.id] ?? []
+            switch baseline {
+            case let .latestRevision(id):
+                guard let baselineRevision = revisions.first(where: { $0.id == id }) else { return false }
+                return revisions.allSatisfy { $0.revision <= baselineRevision.revision }
+            case .noHistory:
+                return revisions.isEmpty
+            }
+        }) else { throw MetricDefinitionEditingV2Error.changed }
         var changes: [(MetricDefinition, String, String, Bool, Bool, MetricDefinitionRevision)] = []
         var initialRevisions: [MetricDefinitionRevision] = []
         var changedRevisionIDs: Set<UUID> = []

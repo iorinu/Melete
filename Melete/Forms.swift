@@ -137,11 +137,11 @@ struct MetricDefinitionEditForm: View {
     @State private var metrics: [MetricDefinitionDraft]
     @State private var validationError: String?
 
-    init(exercise: Exercise, allowsExistingDefinitionEditing: Bool = false, onSave: @escaping ([MetricDefinitionDraft]) -> String?) {
+    init(exercise: Exercise, allowsExistingDefinitionEditing: Bool = false, initialDrafts: [MetricDefinitionDraft]? = nil, onSave: @escaping ([MetricDefinitionDraft]) -> String?) {
         self.exercise = exercise
         self.allowsExistingDefinitionEditing = allowsExistingDefinitionEditing
         self.onSave = onSave
-        _metrics = State(initialValue: MetricDefinitionEditing.draft(for: exercise))
+        _metrics = State(initialValue: initialDrafts ?? MetricDefinitionEditing.draft(for: exercise))
     }
 
     var body: some View {

@@ -71,6 +71,7 @@ struct MainView: View {
     @State private var showingExerciseForm = false
     @State private var editingExercise: Exercise?
     @State private var editingMetricExercise: Exercise?
+    @State private var metricEditingDrafts: [MetricDefinitionDraft]?
     @State private var showingWorkoutForm = false
     @State private var pendingWorkoutDeletion: Workout?
     @State private var editingWorkout: Workout?
@@ -132,7 +133,7 @@ struct MainView: View {
             ExerciseNameEditForm(exercise: exercise) { name in saveExerciseName(name, for: exercise) }
         }
         .sheet(item: $editingMetricExercise) { exercise in
-            MetricDefinitionEditForm(exercise: exercise, allowsExistingDefinitionEditing: storeMode == .isolatedV2Experimental) { drafts in saveMetricDefinitions(drafts, for: exercise) }
+            MetricDefinitionEditForm(exercise: exercise, allowsExistingDefinitionEditing: storeMode == .isolatedV2Experimental, initialDrafts: metricEditingDrafts) { drafts in saveMetricDefinitions(drafts, for: exercise) }
         }
         .sheet(isPresented: $showingWorkoutForm) {
             WorkoutForm(
@@ -502,7 +503,7 @@ struct MainView: View {
                 }
             }
             Spacer()
-            Button("項目を管理") { editingMetricExercise = exercise }
+            Button("項目を管理") { beginMetricDefinitionEditing(exercise) }
             Button("名前を編集", systemImage: "pencil") { editingExercise = exercise }
             Button(exercise.isArchived ? "復帰" : "アーカイブ") {
                 let original = exercise.isArchived
@@ -562,6 +563,21 @@ struct MainView: View {
             return nil
         } catch {
             return error.localizedDescription
+        }
+    }
+
+    private func beginMetricDefinitionEditing(_ exercise: Exercise) {
+        if storeMode == .isolatedV2Experimental {
+            do {
+                metricEditingDrafts = try MetricDefinitionEditingV2.draft(for: exercise, in: context)
+                editingMetricExercise = exercise
+            } catch {
+                metricEditingDrafts = nil
+                errorMessage = error.localizedDescription
+            }
+        } else {
+            metricEditingDrafts = nil
+            editingMetricExercise = exercise
         }
     }
 
