@@ -217,6 +217,26 @@ enum MetricDefinitionEditingError: LocalizedError {
               storedExercise.persistentModelID == exercise.persistentModelID else {
             throw MetricDefinitionEditingV2Error.changed
         }
+        // 同じcontainerの新しいcontextから永続store上の現在値を読み、古いcontextのキャッシュを検査する。
+        let readContext = ModelContext(context.container)
+        let exerciseID = exercise.id
+        let latestExercises = try readContext.fetch(FetchDescriptor<Exercise>(predicate: #Predicate { $0.id == exerciseID }))
+        guard let latestExercise = latestExercises.first,
+              latestExercises.count == 1 else {
+            throw MetricDefinitionEditingV2Error.changed
+        }
+        let contextMetrics = exercise.metrics
+        let latestMetrics = latestExercise.metrics
+        let contextMetricIDs = contextMetrics.map(\.id)
+        let latestMetricIDs = latestMetrics.map(\.id)
+        guard Set(contextMetricIDs).count == contextMetricIDs.count,
+              Set(latestMetricIDs).count == latestMetricIDs.count,
+              Set(contextMetricIDs) == Set(latestMetricIDs),
+              contextMetrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString })
+                == latestMetrics.map(MetricDefinitionSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else {
+            throw MetricDefinitionEditingV2Error.changed
+        }
+        // 検証後からsaveまでに別contextが更新するTOCTOU競合は、この確認では解消しない。
         let metrics = storedExercise.metrics
         let metricIDs = metrics.map(\.id)
         guard Set(metricIDs).count == metricIDs.count else { throw MetricDefinitionEditingV2Error.changed }

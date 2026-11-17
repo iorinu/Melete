@@ -124,6 +124,7 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         let context: ModelContext
         let exercise: Exercise
         let metric: MetricDefinition
+        let storeURL: URL
     }
 
     private enum InjectedFailure: Error { case expected }
@@ -142,7 +143,7 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
             context.insert(MetricDefinitionRevision(metricID: metric.id, revision: 1, name: name, unit: unit, allowsDecimal: true, isRequired: false, sortOrder: 0))
         }
         try context.save()
-        return Fixture(container: container, context: context, exercise: exercise, metric: metric)
+        return Fixture(container: container, context: context, exercise: exercise, metric: metric, storeURL: url)
     }
 
     private func revisedDraft(for exercise: Exercise, name: String? = nil, unit: String? = nil) -> [MetricDefinitionDraft] {
@@ -197,6 +198,58 @@ final class MetricDefinitionEditingV2SafetyTests: XCTestCase {
         }
         XCTAssertFalse(fixture.context.hasChanges)
         try assertMetricAndRevisionsUnchanged(fixture, metricID: fixture.metric.id, snapshot: before, revisionsBefore: revisionsBefore)
+    }
+
+    func testStaleDraftFromSeparateContextCannotOverwriteNewerDefinitionRevisionOrLinkedValue() throws {
+        let fixture = try makeFixture()
+        let metricID = fixture.metric.id
+        let originalRevision = try XCTUnwrap(try fixture.context.fetch(FetchDescriptor<MetricDefinitionRevision>()).first)
+        let oldValue = MetricValue(metric: fixture.metric, scaledValue: 12_500)
+        let workout = Workout(day: Date(timeIntervalSince1970: 1_700_000_000), records: [
+            ExerciseRecord(exercise: fixture.exercise, sortOrder: 0, sets: [SetRecord(sortOrder: 1, values: [oldValue])])
+        ])
+        fixture.context.insert(workout)
+        let oldLink = try MetricValueRevisionLinking.register(value: oldValue, revision: originalRevision, in: fixture.context)
+        try fixture.context.save()
+
+        let staleDrafts = MetricDefinitionEditing.draft(for: fixture.exercise)
+        let schema = Schema(versionedSchema: MeleteSchemaV2.self)
+        let configuration = ModelConfiguration("MeleteMetricDefinitionEditingV2SafetyConcurrent", schema: schema, url: fixture.storeURL, cloudKitDatabase: .none)
+        let secondContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let contextB = ModelContext(secondContainer)
+        let exerciseB = try XCTUnwrap(try contextB.fetch(FetchDescriptor<Exercise>()).first { $0.id == fixture.exercise.id })
+        var latestDrafts = MetricDefinitionEditing.draft(for: exerciseB)
+        latestDrafts[0].unit = "lb"
+        try MetricDefinitionEditingV2.save(latestDrafts, for: exerciseB, in: contextB)
+
+        var staleOunceDrafts = staleDrafts
+        staleOunceDrafts[0].unit = "oz"
+        XCTAssertThrowsError(try MetricDefinitionEditingV2.save(staleOunceDrafts, for: fixture.exercise, in: fixture.context)) { error in
+            switch error {
+            case MetricDefinitionEditingV2Error.changed, MetricValueRevisionLinkingError.snapshotMismatch:
+                break
+            default:
+                XCTFail("staleまたはrevision snapshot不一致として拒否する必要: \(error)")
+            }
+        }
+        XCTAssertFalse(fixture.context.hasChanges)
+
+        let verificationContainer = try ModelContainer(for: schema, configurations: [configuration])
+        let verificationContext = ModelContext(verificationContainer)
+        let savedExercise = try XCTUnwrap(try verificationContext.fetch(FetchDescriptor<Exercise>()).first { $0.id == fixture.exercise.id })
+        let savedMetric = try XCTUnwrap(savedExercise.metrics.first { $0.id == metricID })
+        XCTAssertEqual(savedMetric.unit, "lb")
+        let revisions = try verificationContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
+            .filter { $0.metricID == metricID }.sorted { $0.revision < $1.revision }
+        XCTAssertEqual(revisions.map(\.revision), [1, 2])
+        XCTAssertEqual(revisions.map(\.unit), ["kg", "lb"])
+        XCTAssertEqual(revisions[0].id, originalRevision.id)
+        let savedValue = try XCTUnwrap(try verificationContext.fetch(FetchDescriptor<MetricValue>()).first { $0.id == oldValue.id })
+        XCTAssertEqual(WorkoutValueSnapshot(savedValue), WorkoutValueSnapshot(oldValue))
+        let savedLinks = try verificationContext.fetch(FetchDescriptor<MetricValueRevisionLink>())
+        XCTAssertEqual(savedLinks.map(\.id), [oldLink.id])
+        XCTAssertEqual(savedLinks.first?.valueID, oldValue.id)
+        XCTAssertEqual(savedLinks.first?.revisionID, originalRevision.id)
     }
 
     func testPersistFailureRollsBackCompletelyAndSameDraftCanRetryAfterReopen() throws {
