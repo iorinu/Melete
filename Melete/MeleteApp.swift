@@ -42,9 +42,14 @@ struct MeleteApp: App {
                         || NSClassFromString("XCTestCase") != nil {
                 throw StartupError.invalidUITestStore
             } else {
+#if MELETE_SCRATCH_ISOLATION
+                // scratch検証ビルドは隔離ストア専用。通常ストアは開かずに起動エラーにする
+                throw StartupError.invalidUITestStore
+#else
                 let schema = Schema(versionedSchema: MeleteSchemaV1.self)
                 configuration = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
                 container = try ModelContainer(for: schema, configurations: [configuration])
+#endif
             }
 #else
             let schema = Schema(versionedSchema: MeleteSchemaV1.self)
@@ -180,8 +185,7 @@ enum UITestStoreIsolation {
         let rootMarkerIsRegular = (try? manager.attributesOfItem(atPath: rootMarkerURL.path)[.type] as? FileAttributeType) == .some(.typeRegular)
         let storeMarkerIsRegular = (try? manager.attributesOfItem(atPath: storeMarkerURL.path)[.type] as? FileAttributeType) == .some(.typeRegular)
         guard resolvedRoot == root,
-              resolvedRoot != temporaryRoot,
-              resolvedRoot.path.hasPrefix(temporaryRoot.path.hasSuffix("/") ? temporaryRoot.path : temporaryRoot.path + "/"),
+              rootIsInAllowedArea(resolvedRoot, temporaryRoot: temporaryRoot, manager: manager),
               resolvedDirectory == expectedResolvedDirectory,
               rootOwner == getuid(),
               rootPermissions == 0o700,
@@ -203,6 +207,50 @@ enum UITestStoreIsolation {
               let rootContents = try? manager.contentsOfDirectory(atPath: root.path),
               Set(rootContents) == Set([rootMarker, directory.lastPathComponent]) else { return nil }
         return directory.appendingPathComponent("Melete.store")
+    }
+
+    /// rootを置いてよい場所か。通常DEBUGはシステム一時ディレクトリ配下のみ。
+    /// scratch検証ビルド（MELETE_SCRATCH_ISOLATION）だけ、安全条件を満たすscratch直下も許可する。
+    /// 拒否理由が経路ガードであることを単体テストで確認できるよう、privateにしていない。
+    static func rootIsInAllowedArea(_ root: URL, temporaryRoot: URL, manager: FileManager) -> Bool {
+        let temporaryPrefix = temporaryRoot.path.hasSuffix("/") ? temporaryRoot.path : temporaryRoot.path + "/"
+        if root != temporaryRoot, root.path.hasPrefix(temporaryPrefix) { return true }
+#if MELETE_SCRATCH_ISOLATION
+        // scratchは「直下の子ディレクトリ」だけを許可し、より深い階層やscratch自体は拒否する
+        if let scratchBase = trustedScratchBase(manager: manager),
+           root.deletingLastPathComponent().standardizedFileURL.path == scratchBase.path {
+            return true
+        }
+#endif
+        return false
+    }
+
+    /// ホームからの相対位置。ユーザー名などの個人パスは埋め込まない
+    static let scratchRelativeComponents = [".hermes", "cache", "scratch"]
+
+    /// 安全条件を満たすscratchの場所を返す。条件を満たさなければnil（fail closed）。
+    /// この関数自体は場所の計算だけで、許可するかどうかはrootIsInAllowedAreaのコンパイル条件で決まる。
+    static func trustedScratchBase(manager: FileManager = .default) -> URL? {
+        // HOME環境変数は起動時に差し替えられるため使わず、パスワードDBのホームを使う
+        guard let entry = getpwuid(getuid()), let homePointer = entry.pointee.pw_dir else { return nil }
+        let home = URL(fileURLWithPath: String(cString: homePointer), isDirectory: true).standardizedFileURL
+        guard home.path != "/", home.resolvingSymlinksInPath().standardizedFileURL == home else { return nil }
+        var current = home
+        for component in scratchRelativeComponents {
+            current = current.appendingPathComponent(component, isDirectory: true)
+            guard isTrustedDirectory(current, manager: manager) else { return nil }
+        }
+        return current.standardizedFileURL
+    }
+
+    /// symlinkでない実ディレクトリで、所有者が自分、group/otherに書き込み権限がないこと
+    static func isTrustedDirectory(_ url: URL, manager: FileManager) -> Bool {
+        // attributesOfItemはsymlinkをたどらないため、symlinkならtypeがtypeSymbolicLinkになり拒否される
+        guard let attributes = try? manager.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeDirectory,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              let permissions = (attributes[.posixPermissions] as? NSNumber)?.uint16Value else { return false }
+        return permissions & 0o022 == 0
     }
 
     private static func validStoreContents(_ contents: [String], in directory: URL, manager: FileManager) -> Bool {

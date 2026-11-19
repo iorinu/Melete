@@ -10,10 +10,15 @@ settings:
     PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.Melete
     GENERATE_INFOPLIST_FILE: YES
     INFOPLIST_KEY_CFBundleDisplayName: Melete
+  configs:
+    ScratchProbe:
+      # scratch隔離領域を許可するのはこの検証ビルドだけ（コンパイル時の明示オプトイン）
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG MELETE_SCRATCH_ISOLATION
 configs:
   Debug: debug
   Release: release
   WindowProbe: debug
+  ScratchProbe: debug
 targets:
   Melete:
     type: application
@@ -26,6 +31,8 @@ targets:
       configs:
         WindowProbe:
           PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.Melete.UITesting
+        ScratchProbe:
+          PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.Melete.UITesting.Scratch
   MeleteTests:
     type: bundle.unit-test
     platform: macOS
@@ -73,3 +80,23 @@ schemes:
       targets:
         - name: MeleteTests
         - name: MeleteUITests
+  # 全アクションをScratchProbe構成に固定する（省略するとprofile/archiveはRelease、analyzeはDebugになり通常ストアを開き得る）
+  Melete-ScratchProbe:
+    build:
+      targets:
+        Melete: all
+        MeleteTests: [test]
+        MeleteUITests: [test]
+    run:
+      config: ScratchProbe
+    test:
+      config: ScratchProbe
+      targets:
+        - name: MeleteTests
+        - name: MeleteUITests
+    profile:
+      config: ScratchProbe
+    analyze:
+      config: ScratchProbe
+    archive:
+      config: ScratchProbe

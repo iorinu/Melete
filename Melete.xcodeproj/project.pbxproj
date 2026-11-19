@@ -21,6 +21,7 @@
 		925EBE931A57CF1734D2716A /* WorkoutCreationV2StaleDefinitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD51A56DBF8B717AC45A0123 /* WorkoutCreationV2StaleDefinitionTests.swift */; };
 		96B9A241D0F3EEB232A1AA72 /* StartupRouteSelectionSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 308D14CB80589606A1C4924A /* StartupRouteSelectionSafetyTests.swift */; };
 		A1023825BD5F534FADFEBD85 /* WindowProbeSmokeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D23831650E229F7C011CEF8 /* WindowProbeSmokeUITests.swift */; };
+		B5C4E8ABC43C57B80ED4D52A /* ScratchStoreIsolationSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C871CAE169789FECB4314785 /* ScratchStoreIsolationSafetyTests.swift */; };
 		DC33B7EFF60C51528CEBF876 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */; };
 		DC4F51B939B8ABA7BA7DBAE4 /* WorkoutCreationV2BaselineSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82E64515C0C28160225902DD /* WorkoutCreationV2BaselineSafetyTests.swift */; };
 		FC499306A3AF6702E15D96D5 /* WorkoutSetAdditionV2BaselineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62E0853B07361D673A7EF141 /* WorkoutSetAdditionV2BaselineTests.swift */; };
@@ -64,6 +65,7 @@
 		B0E0148A2D561EB54BF4E63C /* WorkoutSetAdditionV2RoundTripStaleDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutSetAdditionV2RoundTripStaleDraftTests.swift; sourceTree = "<group>"; };
 		B63DFF5A9FDE17D429352999 /* StartupRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRoute.swift; sourceTree = "<group>"; };
 		C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDefinitionEditingV2RoundTripStaleDraftTests.swift; sourceTree = "<group>"; };
+		C871CAE169789FECB4314785 /* ScratchStoreIsolationSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScratchStoreIsolationSafetyTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -73,6 +75,7 @@
 				8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */,
 				C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */,
 				5744EF0E54881543913A57EE /* MetricDefinitionEditingV2SafetyTests.swift */,
+				C871CAE169789FECB4314785 /* ScratchStoreIsolationSafetyTests.swift */,
 				308D14CB80589606A1C4924A /* StartupRouteSelectionSafetyTests.swift */,
 				A5C997364BAAE4B0E0146A30 /* SwiftDataV1BackupSafetyTests.swift */,
 				82E64515C0C28160225902DD /* WorkoutCreationV2BaselineSafetyTests.swift */,
@@ -233,6 +236,7 @@
 				1B2D9B260F7B64EE334FE9FE /* MeleteTests.swift in Sources */,
 				DC33B7EFF60C51528CEBF876 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift in Sources */,
 				5C084228CF861D55A4CD8040 /* MetricDefinitionEditingV2SafetyTests.swift in Sources */,
+				B5C4E8ABC43C57B80ED4D52A /* ScratchStoreIsolationSafetyTests.swift in Sources */,
 				96B9A241D0F3EEB232A1AA72 /* StartupRouteSelectionSafetyTests.swift in Sources */,
 				2F17F3DA27F5CCCAF1DB79BD /* SwiftDataV1BackupSafetyTests.swift in Sources */,
 				DC4F51B939B8ABA7BA7DBAE4 /* WorkoutCreationV2BaselineSafetyTests.swift in Sources */,
@@ -271,6 +275,87 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		0CB39FEB3A281DD138C5C66E /* ScratchProbe */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = jp.iorinu.Melete.UITesting.Scratch;
+				PRODUCT_NAME = Melete;
+				SDKROOT = macosx;
+			};
+			name = ScratchProbe;
+		};
+		291E9C3140444EBE6528DDE6 /* ScratchProbe */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Melete;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = jp.iorinu.Melete;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG MELETE_SCRATCH_ISOLATION";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+			};
+			name = ScratchProbe;
+		};
 		2FE243D383A9F5167A48F65C /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -388,6 +473,22 @@
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Melete.app/Contents/MacOS/Melete";
 			};
 			name = Release;
+		};
+		4E7F58A78FBB87F6866D5063 /* ScratchProbe */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = jp.iorinu.MeleteUITests;
+				SDKROOT = macosx;
+				TEST_TARGET_NAME = Melete;
+			};
+			name = ScratchProbe;
 		};
 		682388CB55A6C48511B5BB0C /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -585,6 +686,22 @@
 			};
 			name = Debug;
 		};
+		AE356EF4A979A33E78AE927D /* ScratchProbe */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = jp.iorinu.MeleteTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Melete.app/Contents/MacOS/Melete";
+			};
+			name = ScratchProbe;
+		};
 		C58DBB12DE8DC31AB3839838 /* WindowProbe */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -609,6 +726,7 @@
 			buildConfigurations = (
 				682388CB55A6C48511B5BB0C /* Debug */,
 				4420AF3B5A528749CAC5EB96 /* Release */,
+				AE356EF4A979A33E78AE927D /* ScratchProbe */,
 				83D4BF77A0DEB0EEF01FB918 /* WindowProbe */,
 			);
 			defaultConfigurationIsVisible = 0;
@@ -619,6 +737,7 @@
 			buildConfigurations = (
 				2FE243D383A9F5167A48F65C /* Debug */,
 				3299E3049A5E2A2646A10BE9 /* Release */,
+				0CB39FEB3A281DD138C5C66E /* ScratchProbe */,
 				3AC72923F3116A068E792594 /* WindowProbe */,
 			);
 			defaultConfigurationIsVisible = 0;
@@ -629,6 +748,7 @@
 			buildConfigurations = (
 				A618CB2B9B796583807E93E0 /* Debug */,
 				3C176305C322901A01052B05 /* Release */,
+				291E9C3140444EBE6528DDE6 /* ScratchProbe */,
 				9FE14BA7DBC0A42F56704D8F /* WindowProbe */,
 			);
 			defaultConfigurationIsVisible = 0;
@@ -639,6 +759,7 @@
 			buildConfigurations = (
 				6DD4E60498F26130F07A0483 /* Debug */,
 				8A1FA2D0F38B7610F2DFC0D4 /* Release */,
+				4E7F58A78FBB87F6866D5063 /* ScratchProbe */,
 				C58DBB12DE8DC31AB3839838 /* WindowProbe */,
 			);
 			defaultConfigurationIsVisible = 0;
