@@ -445,20 +445,21 @@ struct WorkoutValueEditForm: View {
     @Environment(\.dismiss) private var dismiss
     let workout: Workout
     let exercises: [Exercise]
-    var onSave: (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?
+    var onSave: (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft], WorkoutAdditionBaseline) -> String?
     var makeAdditionDraft: (ExerciseRecord, Exercise) throws -> WorkoutSetAdditionDraft?
     var onDeleteSet: (WorkoutSetDeletionTarget) -> String?
     var captureSetDeletionTarget: (Workout, ExerciseRecord, SetRecord) throws -> WorkoutSetDeletionTarget
     var onDeleteRecord: (WorkoutRecordDeletionTarget) -> String?
     var captureRecordDeletionTarget: (Workout, ExerciseRecord) throws -> WorkoutRecordDeletionTarget
     @State private var drafts: [WorkoutValueEditDraft]
+    @State private var baseline: WorkoutAdditionBaseline
     @State private var day: Date
     @State private var validationError: String?
     @State private var additions = WorkoutSetAdditionDrafts()
     @State private var pendingSetDeletion: WorkoutSetDeletionTarget?
     @State private var pendingRecordDeletion: WorkoutRecordDeletionTarget?
 
-    init(workout: Workout, exercises: [Exercise], onSave: @escaping (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft]) -> String?, makeAdditionDraft: @escaping (ExerciseRecord, Exercise) throws -> WorkoutSetAdditionDraft? = { record, exercise in WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise) }, onDeleteSet: @escaping (WorkoutSetDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureSetDeletionTarget: @escaping (Workout, ExerciseRecord, SetRecord) throws -> WorkoutSetDeletionTarget = { workout, record, set in WorkoutSetDeletionTarget(workout: workout, record: record, set: set) }, onDeleteRecord: @escaping (WorkoutRecordDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureRecordDeletionTarget: @escaping (Workout, ExerciseRecord) throws -> WorkoutRecordDeletionTarget = { workout, record in WorkoutRecordDeletionTarget(workout: workout, record: record) }) {
+    init(workout: Workout, exercises: [Exercise], onSave: @escaping (Date, [WorkoutValueEditDraft], [WorkoutSetAdditionDraft], WorkoutAdditionBaseline) -> String?, makeAdditionDraft: @escaping (ExerciseRecord, Exercise) throws -> WorkoutSetAdditionDraft? = { record, exercise in WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise) }, onDeleteSet: @escaping (WorkoutSetDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureSetDeletionTarget: @escaping (Workout, ExerciseRecord, SetRecord) throws -> WorkoutSetDeletionTarget = { workout, record, set in WorkoutSetDeletionTarget(workout: workout, record: record, set: set) }, onDeleteRecord: @escaping (WorkoutRecordDeletionTarget) -> String? = { _ in "削除を利用できません。" }, captureRecordDeletionTarget: @escaping (Workout, ExerciseRecord) throws -> WorkoutRecordDeletionTarget = { workout, record in WorkoutRecordDeletionTarget(workout: workout, record: record) }) {
         self.workout = workout
         self.exercises = exercises
         self.onSave = onSave
@@ -468,6 +469,7 @@ struct WorkoutValueEditForm: View {
         self.onDeleteRecord = onDeleteRecord
         self.captureRecordDeletionTarget = captureRecordDeletionTarget
         _drafts = State(initialValue: WorkoutValueEditing.drafts(for: workout))
+        _baseline = State(initialValue: WorkoutAdditionBaseline(workout))
         let storedDay = WorkoutValueEditing.date(from: workout.day)
         _day = State(initialValue: storedDay ?? Calendar.current.startOfDay(for: .now))
         _validationError = State(initialValue: storedDay == nil ? WorkoutValueEditError.invalidStoredDay.localizedDescription : nil)
@@ -601,7 +603,7 @@ struct WorkoutValueEditForm: View {
         case .failure(let error):
             validationError = error.localizedDescription
         case .success:
-            if let error = onSave(day, drafts, additions.items) {
+            if let error = onSave(day, drafts, additions.items, baseline) {
                 validationError = error
             } else {
                 dismiss()

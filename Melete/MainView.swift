@@ -188,8 +188,8 @@ struct MainView: View {
             }
         }
         .sheet(item: $editingWorkout) { workout in
-            WorkoutValueEditForm(workout: workout, exercises: exercises, onSave: { day, drafts, additions in
-                saveWorkoutEdits(workout: workout, day: day, drafts: drafts, additions: additions)
+            WorkoutValueEditForm(workout: workout, exercises: exercises, onSave: { day, drafts, additions, baseline in
+                saveWorkoutEdits(workout: workout, day: day, drafts: drafts, additions: additions, baseline: baseline)
             }, makeAdditionDraft: { record, exercise in
                 if storeMode == .isolatedV2Experimental { return try WorkoutWritingServiceV2(context: context).appendSetDraft(for: record, exercise: exercise) }
                 return WorkoutValueEditing.appendSetDraft(for: record, exercise: exercise)
@@ -671,12 +671,14 @@ struct MainView: View {
         }
     }
 
-    private func saveWorkoutEdits(workout: Workout, day: Date, drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft]) -> String? {
+    private func saveWorkoutEdits(workout: Workout, day: Date, drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft], baseline: WorkoutAdditionBaseline) -> String? {
         do {
             if storeMode == .isolatedV2Experimental {
                 try WorkoutWritingServiceV2(context: context).saveWorkoutEdits(drafts, additions: additions, day: day, to: workout, exercises: exercises)
+            } else if !additions.isEmpty {
+                try WorkoutSetAdditionV1.save(drafts, additions: additions, baseline: baseline, day: day, to: workout, exercises: exercises, in: context)
             } else {
-                try WorkoutValueEditing.save(drafts, additions: additions, day: day, to: workout, exercises: exercises, discard: { context.delete($0) }) { try context.save() }
+                try WorkoutValueEditing.save(drafts, additions: [], day: day, to: workout, exercises: exercises, discard: { context.delete($0) }) { try context.save() }
             }
             return nil
         } catch {

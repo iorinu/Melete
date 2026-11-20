@@ -824,6 +824,14 @@ struct WorkoutSetMetricDraft: Equatable {
 }
 
 enum WorkoutValueEditing {
+    static func orderedActiveMetrics(_ metrics: [MetricDefinition]) -> [MetricDefinition] {
+        metrics.filter(\.isActive).sorted {
+            $0.sortOrder == $1.sortOrder
+                ? $0.id.uuidString < $1.id.uuidString
+                : $0.sortOrder < $1.sortOrder
+        }
+    }
+
     static func deletionDraftsAreClean(_ drafts: [WorkoutValueEditDraft], originalDrafts: [WorkoutValueEditDraft], day: Date, originalDay: Date, additions: [WorkoutSetAdditionDraft]) -> Bool {
         drafts == originalDrafts && additions.isEmpty && Calendar.current.startOfDay(for: day) == Calendar.current.startOfDay(for: originalDay)
     }
@@ -838,9 +846,9 @@ enum WorkoutValueEditing {
     }
 
     static func drafts(for workout: Workout) -> [WorkoutValueEditDraft] {
-        workout.records.sorted { $0.sortOrder < $1.sortOrder }.flatMap { record in
-            record.sets.sorted { $0.sortOrder < $1.sortOrder }.flatMap { set in
-                set.values.map { value in
+        workout.records.sorted { $0.sortOrder == $1.sortOrder ? $0.id.uuidString < $1.id.uuidString : $0.sortOrder < $1.sortOrder }.flatMap { record in
+            record.sets.sorted { $0.sortOrder == $1.sortOrder ? $0.id.uuidString < $1.id.uuidString : $0.sortOrder < $1.sortOrder }.flatMap { set in
+                set.values.sorted { $0.id.uuidString < $1.id.uuidString }.map { value in
                     WorkoutValueEditDraft(
                         valueID: value.id,
                         exerciseName: record.exerciseName,
@@ -883,7 +891,7 @@ enum WorkoutValueEditing {
 
     static func appendSetDraft(for record: ExerciseRecord, exercise: Exercise) -> WorkoutSetAdditionDraft? {
         guard exercise.id == record.exerciseID, !exercise.isArchived else { return nil }
-        let metrics = exercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }.map {
+        let metrics = orderedActiveMetrics(exercise.metrics).map {
             WorkoutSetMetricDraft(id: $0.id, name: $0.name, unit: $0.unit, allowsDecimal: $0.allowsDecimal, isRequired: $0.isRequired)
         }
         return WorkoutSetAdditionDraft(id: UUID(), recordID: record.id, exerciseID: exercise.id, exerciseName: exercise.name, metrics: metrics, values: [:], historyBaselines: nil)
@@ -919,7 +927,7 @@ enum WorkoutValueEditing {
             guard let record = workout.records.first(where: { $0.id == addition.recordID }),
                   let exercise = exercises.first(where: { $0.id == addition.exerciseID }),
                   record.exerciseID == exercise.id, !exercise.isArchived else { throw WorkoutValueEditError.exerciseUnavailable }
-            let current = exercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }.map {
+            let current = orderedActiveMetrics(exercise.metrics).map {
                 WorkoutSetMetricDraft(id: $0.id, name: $0.name, unit: $0.unit, allowsDecimal: $0.allowsDecimal, isRequired: $0.isRequired)
             }
             guard current == addition.metrics else { throw WorkoutValueEditError.metricsChanged }
@@ -967,6 +975,68 @@ enum WorkoutValueEditing {
     }
 }
 
+// V1の追加セット保存境界。未保存変更を巻き込まないよう、clean contextだけで実行する。
+struct WorkoutAdditionBaseline: Equatable {
+    let workoutID: UUID
+    let day: String
+    let records: [WorkoutRecordSnapshot]
+
+    init(_ workout: Workout) {
+        workoutID = workout.id
+        day = workout.day
+        records = workout.records.map(WorkoutRecordSnapshot.init).sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+}
+
+@MainActor enum WorkoutSetAdditionV1 {
+    static func save(_ drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft], baseline: WorkoutAdditionBaseline?, day: Date, to workout: Workout, exercises: [Exercise], in context: ModelContext, calendar: Calendar = .current, now: Date = .now, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
+        guard !context.hasChanges else { throw WorkoutValueEditError.unsavedContext }
+        guard workout.modelContext === context else { throw WorkoutValueEditError.workoutContextMismatch }
+        guard let baseline, baseline.workoutID == workout.id else { throw WorkoutValueEditError.workoutContextMismatch }
+
+        let workoutID = workout.id
+        let matches = try context.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
+        guard matches.count == 1, let currentWorkout = matches.first,
+              currentWorkout.persistentModelID == workout.persistentModelID else {
+            throw WorkoutValueEditError.workoutContextMismatch
+        }
+        let readContext = ModelContext(context.container)
+        let latestWorkouts = try readContext.fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID }))
+        guard latestWorkouts.count == 1, let latestWorkout = latestWorkouts.first,
+              latestWorkout.persistentModelID == workout.persistentModelID,
+              WorkoutRecordDeletionSnapshot.hasUniqueIDs(latestWorkout),
+              latestWorkout.day == currentWorkout.day,
+              latestWorkout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString })
+                == currentWorkout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }),
+              baseline.day == latestWorkout.day,
+              baseline.records == latestWorkout.records.map(WorkoutRecordSnapshot.init).sorted(by: { $0.id.uuidString < $1.id.uuidString }) else {
+            throw WorkoutValueEditError.workoutContextMismatch
+        }
+
+        // 各追加draftの基準と永続済み最新定義を別contextで比較する。
+        for addition in additions {
+            let readContext = ModelContext(context.container)
+            let latest = try readContext.fetch(FetchDescriptor<Exercise>()).first { $0.id == addition.exerciseID }
+            guard let latest, !latest.isArchived else { throw WorkoutValueEditError.metricsChanged }
+            let current = WorkoutValueEditing.orderedActiveMetrics(latest.metrics).map {
+                WorkoutSetMetricDraft(id: $0.id, name: $0.name, unit: $0.unit, allowsDecimal: $0.allowsDecimal, isRequired: $0.isRequired)
+            }
+            guard current == addition.metrics else { throw WorkoutValueEditError.metricsChanged }
+        }
+
+        do {
+            try WorkoutValueEditing.save(
+                drafts, additions: additions, day: day, to: workout, exercises: exercises,
+                calendar: calendar, now: now,
+                discard: { context.delete($0) }, persist: { try persist(context) }
+            )
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+}
+
 enum WorkoutValueEditError: LocalizedError {
     case invalid(exerciseName: String, setOrder: Int, metricName: String)
     case required(exerciseName: String, setOrder: Int, metricName: String)
@@ -979,6 +1049,8 @@ enum WorkoutValueEditError: LocalizedError {
     case setOrderOverflow
     case emptySetMetrics
     case storedValueMismatch
+    case unsavedContext
+    case workoutContextMismatch
 
     var errorDescription: String? {
         switch self {
@@ -993,6 +1065,8 @@ enum WorkoutValueEditError: LocalizedError {
         case .setOrderOverflow: "セット番号の上限に達したため、セットを追加できません。"
         case .emptySetMetrics: "有効な項目がない種目には、空のセットを追加できません。"
         case .storedValueMismatch: "編集内容が保存済みの記録値と一致しません。画面を開き直してから再度お試しください。"
+        case .unsavedContext: "未保存の変更があるため、追加セットを保存できません。先に変更を保存するか、画面を開き直してください。"
+        case .workoutContextMismatch: "運動記録が現在のデータ画面に属していません。画面を開き直してください。"
         }
     }
 }
@@ -1145,7 +1219,7 @@ enum MetricValueRevisionLinking {
                   let latestExercise = latestExercisesByID[addition.exerciseID] else {
                 throw WorkoutValueEditError.metricsChanged
             }
-            let latestMetrics = latestExercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }.map {
+            let latestMetrics = WorkoutValueEditing.orderedActiveMetrics(latestExercise.metrics).map {
                 WorkoutSetMetricDraft(id: $0.id, name: $0.name, unit: $0.unit, allowsDecimal: $0.allowsDecimal, isRequired: $0.isRequired)
             }
             guard latestMetrics == addition.metrics else { throw WorkoutValueEditError.metricsChanged }
