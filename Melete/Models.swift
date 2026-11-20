@@ -216,6 +216,38 @@ enum MetricDefinitionEditingError: LocalizedError {
     }
 }
 
+// 通常V1のアプリ保存境界。clean contextのみ許可し、対象モデルの所有者も照合する。
+@MainActor enum MetricDefinitionEditingV1 {
+    static func save(_ drafts: [MetricDefinitionDraft], for exercise: Exercise, in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
+        guard !context.hasChanges else { throw MetricDefinitionEditingV1Error.unsavedContext }
+        guard exercise.modelContext === context else { throw MetricDefinitionEditingV1Error.wrongContext }
+        do {
+            try MetricDefinitionEditing.save(
+                drafts, for: exercise,
+                insert: { context.insert($0) },
+                discard: { context.delete($0) },
+                persist: { try persist(context) }
+            )
+        } catch {
+            // 共通saveがsnapshot復元と追加項目の破棄を終えた後にcontextをcleanに戻す。
+            context.rollback()
+            throw error
+        }
+    }
+}
+
+enum MetricDefinitionEditingV1Error: LocalizedError, Equatable {
+    case unsavedContext
+    case wrongContext
+
+    var errorDescription: String? {
+        switch self {
+        case .unsavedContext: "未保存の変更があるため、項目定義を保存できません。先に変更を保存するか、画面を開き直してください。"
+        case .wrongContext: "項目定義の保存対象が現在のデータ画面に属していません。画面を開き直してください。"
+        }
+    }
+}
+
 // V2実験ストアの既存項目編集境界。通常ストアからは呼び出さない。
 @MainActor enum MetricDefinitionEditingV2 {
     private static func hasUniqueRevisionNumbers(_ revisions: [MetricDefinitionRevision]) -> Bool {

@@ -60,6 +60,45 @@ enum WorkoutCalendarLogic {
     }
 }
 
+struct MetricDefinitionEditingSession: Identifiable {
+    enum Mode: Equatable { case v1, v2 }
+
+    let id: UUID
+    let exercise: Exercise
+    let mode: Mode
+    let drafts: [MetricDefinitionDraft]
+
+    private init(id: UUID = UUID(), exercise: Exercise, mode: Mode, drafts: [MetricDefinitionDraft]) {
+        self.id = id
+        self.exercise = exercise
+        self.mode = mode
+        self.drafts = drafts
+    }
+
+    static func v1(exercise: Exercise) -> MetricDefinitionEditingSession {
+        MetricDefinitionEditingSession(exercise: exercise, mode: .v1, drafts: MetricDefinitionEditing.draft(for: exercise))
+    }
+
+    static func v2(exercise: Exercise, drafts: [MetricDefinitionDraft]) throws -> MetricDefinitionEditingSession {
+        try validateV2Drafts(drafts)
+        return MetricDefinitionEditingSession(exercise: exercise, mode: .v2, drafts: drafts)
+    }
+
+    static func validateV2Drafts(_ drafts: [MetricDefinitionDraft]) throws {
+        guard drafts.allSatisfy({ $0.original == nil || $0.historyBaseline != nil }) else {
+            throw MetricDefinitionEditingSessionError.missingBaseline
+        }
+    }
+}
+
+enum MetricDefinitionEditingSessionError: LocalizedError, Equatable {
+    case missingBaseline
+
+    var errorDescription: String? {
+        "項目の履歴基準を取得できないため、編集を保存できません。画面を開き直してください。"
+    }
+}
+
 struct MainView: View {
     enum StoreMode: Equatable { case v1, isolatedV2Experimental }
     let storeMode: StoreMode
@@ -70,8 +109,7 @@ struct MainView: View {
     @FocusState private var focusedSection: String?
     @State private var showingExerciseForm = false
     @State private var editingExercise: Exercise?
-    @State private var editingMetricExercise: Exercise?
-    @State private var metricEditingDrafts: [MetricDefinitionDraft]?
+    @State private var metricDefinitionEditingSession: MetricDefinitionEditingSession?
     @State private var showingWorkoutForm = false
     @State private var pendingWorkoutDeletion: WorkoutDeletionTarget?
     @State private var editingWorkout: Workout?
@@ -132,8 +170,8 @@ struct MainView: View {
         .sheet(item: $editingExercise) { exercise in
             ExerciseNameEditForm(exercise: exercise) { name in saveExerciseName(name, for: exercise) }
         }
-        .sheet(item: $editingMetricExercise) { exercise in
-            MetricDefinitionEditForm(exercise: exercise, allowsExistingDefinitionEditing: storeMode == .isolatedV2Experimental, initialDrafts: metricEditingDrafts) { drafts in saveMetricDefinitions(drafts, for: exercise) }
+        .sheet(item: $metricDefinitionEditingSession) { session in
+            MetricDefinitionEditForm(exercise: session.exercise, allowsExistingDefinitionEditing: session.mode == .v2, initialDrafts: session.drafts) { drafts in saveMetricDefinitions(drafts, for: session) }
         }
         .sheet(isPresented: $showingWorkoutForm) {
             WorkoutForm(
@@ -582,12 +620,14 @@ struct MainView: View {
         }
     }
 
-    private func saveMetricDefinitions(_ drafts: [MetricDefinitionDraft], for exercise: Exercise) -> String? {
+    private func saveMetricDefinitions(_ drafts: [MetricDefinitionDraft], for session: MetricDefinitionEditingSession) -> String? {
         do {
-            if storeMode == .isolatedV2Experimental {
-                try WorkoutWritingServiceV2(context: context).saveMetricDefinitions(drafts, for: exercise)
-            } else {
-                try MetricDefinitionEditing.save(drafts, for: exercise, insert: { context.insert($0) }, discard: { context.delete($0) }) { try context.save() }
+            switch session.mode {
+            case .v2:
+                try MetricDefinitionEditingSession.validateV2Drafts(drafts)
+                try WorkoutWritingServiceV2(context: context).saveMetricDefinitions(drafts, for: session.exercise)
+            case .v1:
+                try MetricDefinitionEditingV1.save(drafts, for: session.exercise, in: context)
             }
             return nil
         } catch {
@@ -598,15 +638,13 @@ struct MainView: View {
     private func beginMetricDefinitionEditing(_ exercise: Exercise) {
         if storeMode == .isolatedV2Experimental {
             do {
-                metricEditingDrafts = try MetricDefinitionEditingV2.draft(for: exercise, in: context)
-                editingMetricExercise = exercise
+                let drafts = try MetricDefinitionEditingV2.draft(for: exercise, in: context)
+                metricDefinitionEditingSession = try MetricDefinitionEditingSession.v2(exercise: exercise, drafts: drafts)
             } catch {
-                metricEditingDrafts = nil
                 errorMessage = error.localizedDescription
             }
         } else {
-            metricEditingDrafts = nil
-            editingMetricExercise = exercise
+            metricDefinitionEditingSession = .v1(exercise: exercise)
         }
     }
 
