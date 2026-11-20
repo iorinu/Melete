@@ -857,7 +857,24 @@ enum WorkoutValueEditing {
         return WorkoutSetAdditionDraft(id: UUID(), recordID: record.id, exerciseID: exercise.id, exerciseName: exercise.name, metrics: metrics, values: [:], historyBaselines: nil)
     }
 
+    // validatedValuesはdraft自身の項目設定で検証するため、保存済みMetricValueのsnapshotと一致するdraftだけを受け付ける。
+    // 対象外・重複したvalueIDも、どの保存済み値を検証したか確定できないため拒否する。モデルは変更しない。
+    static func verifyStoredSnapshots(_ drafts: [WorkoutValueEditDraft], in workout: Workout) throws {
+        let storedByID = Dictionary(grouping: workout.records.flatMap(\.sets).flatMap(\.values), by: \.id)
+        var seenValueIDs = Set<UUID>()
+        for draft in drafts {
+            guard seenValueIDs.insert(draft.valueID).inserted,
+                  let matches = storedByID[draft.valueID], matches.count == 1, let stored = matches.first,
+                  stored.name == draft.name, stored.unit == draft.unit,
+                  stored.allowsDecimal == draft.allowsDecimal, stored.isRequired == draft.isRequired else {
+                throw WorkoutValueEditError.storedValueMismatch
+            }
+        }
+    }
+
     static func save(_ drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft], day: Date, to workout: Workout, exercises: [Exercise], calendar: Calendar = .current, now: Date = .now, discard: (SetRecord) -> Void = { _ in }, persist: () throws -> Void) throws {
+        // 入力値の検証より先に照合し、draftの設定を偽装した入力がその設定のまま検証されないようにする。
+        try verifyStoredSnapshots(drafts, in: workout)
         guard case let .success(values) = validatedValues(from: drafts) else { throw WorkoutValueEditError.invalidDrafts }
         guard calendar.startOfDay(for: day) <= calendar.startOfDay(for: now) else { throw WorkoutValueEditError.futureDay }
         guard Self.date(from: workout.day, calendar: calendar) != nil else { throw WorkoutValueEditError.invalidStoredDay }
@@ -929,6 +946,7 @@ enum WorkoutValueEditError: LocalizedError {
     case duplicateAdditionDraft
     case setOrderOverflow
     case emptySetMetrics
+    case storedValueMismatch
 
     var errorDescription: String? {
         switch self {
@@ -942,6 +960,7 @@ enum WorkoutValueEditError: LocalizedError {
         case .duplicateAdditionDraft: "追加セットの入力が重複しています。画面を開き直してください。"
         case .setOrderOverflow: "セット番号の上限に達したため、セットを追加できません。"
         case .emptySetMetrics: "有効な項目がない種目には、空のセットを追加できません。"
+        case .storedValueMismatch: "編集内容が保存済みの記録値と一致しません。画面を開き直してから再度お試しください。"
         }
     }
 }
@@ -1072,7 +1091,11 @@ enum MetricValueRevisionLinking {
     }
 
     static func save(_ drafts: [WorkoutValueEditDraft], additions: [WorkoutSetAdditionDraft], day: Date, to workout: Workout, exercises: [Exercise], in context: ModelContext, calendar: Calendar = .current, now: Date = .now, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
+        // workoutの変更は所有contextに記録されるため、別contextやcontext無しではsaveしても永続化されない。どのモデルにも触れる前に拒否する。
+        guard let owner = workout.modelContext, owner === context else { throw WorkoutValueEditingV2Error.workoutContextMismatch }
         guard !context.hasChanges else { throw WorkoutCreationV2Error.unsavedContext }
+        // revision挿入より前に照合し、偽装draftでcontextを一時的にも変更しない。
+        try WorkoutValueEditing.verifyStoredSnapshots(drafts, in: workout)
         let readContext = ModelContext(context.container)
         let freshRevisions = try readContext.fetch(FetchDescriptor<MetricDefinitionRevision>())
         var latestExercisesByID: [UUID: Exercise] = [:]
@@ -1143,6 +1166,16 @@ enum MetricValueRevisionLinking {
             // 開始時にcleanであることを確認した同期処理なので、この処理中の変更だけを破棄できる。
             context.rollback()
             throw error
+        }
+    }
+}
+
+enum WorkoutValueEditingV2Error: LocalizedError {
+    case workoutContextMismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .workoutContextMismatch: "編集対象の運動記録が現在の保存先と一致しないため、保存できません。画面を開き直してください。"
         }
     }
 }
