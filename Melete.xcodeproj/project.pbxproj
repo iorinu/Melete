@@ -28,6 +28,7 @@
 		B5C4E8ABC43C57B80ED4D52A /* ScratchStoreIsolationSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C871CAE169789FECB4314785 /* ScratchStoreIsolationSafetyTests.swift */; };
 		C02FF2F6162E940CA8631AC8 /* WorkoutValueEditingV1StaleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39FBF3A14BF576582DF8D4F2 /* WorkoutValueEditingV1StaleTests.swift */; };
 		C1334C724424A09CE17E29E7 /* WorkoutCreationV2ScratchReopenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3200BD67C58695CF4EDA18E /* WorkoutCreationV2ScratchReopenTests.swift */; };
+		CB9ABAA69A918A30081D8C44 /* MetricDefinitionDraftCancellationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28305B2452610AFE9FDB7B4C /* MetricDefinitionDraftCancellationTests.swift */; };
 		CC89A076DF734B3E220154E7 /* WorkoutSetAdditionV1ScratchStaleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83F16CC501E442AA3860B1BF /* WorkoutSetAdditionV1ScratchStaleTests.swift */; };
 		DC33B7EFF60C51528CEBF876 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */; };
 		DC4F51B939B8ABA7BA7DBAE4 /* WorkoutCreationV2BaselineSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82E64515C0C28160225902DD /* WorkoutCreationV2BaselineSafetyTests.swift */; };
@@ -57,6 +58,7 @@
 		060EE2CD5220532F134E4EEA /* MeleteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeleteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1D01079DB1973F4AB20BAA97 /* Forms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Forms.swift; sourceTree = "<group>"; };
 		259144994B35EF35E28C6AC1 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		28305B2452610AFE9FDB7B4C /* MetricDefinitionDraftCancellationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDefinitionDraftCancellationTests.swift; sourceTree = "<group>"; };
 		308D14CB80589606A1C4924A /* StartupRouteSelectionSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRouteSelectionSafetyTests.swift; sourceTree = "<group>"; };
 		3423B998A6D0437720F26F51 /* MeleteUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeleteUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		39FBF3A14BF576582DF8D4F2 /* WorkoutValueEditingV1StaleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutValueEditingV1StaleTests.swift; sourceTree = "<group>"; };
@@ -89,6 +91,7 @@
 			isa = PBXGroup;
 			children = (
 				8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */,
+				28305B2452610AFE9FDB7B4C /* MetricDefinitionDraftCancellationTests.swift */,
 				D17F434C47A55AD67B54B62D /* MetricDefinitionEditingSessionTests.swift */,
 				02CF2836E0B70B22EFFA764A /* MetricDefinitionEditingV1ScratchSafetyTests.swift */,
 				C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */,
@@ -258,6 +261,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1B2D9B260F7B64EE334FE9FE /* MeleteTests.swift in Sources */,
+				CB9ABAA69A918A30081D8C44 /* MetricDefinitionDraftCancellationTests.swift in Sources */,
 				48798925D9CF165FAD883284 /* MetricDefinitionEditingSessionTests.swift in Sources */,
 				7AD4BA35E51CF214284E8585 /* MetricDefinitionEditingV1ScratchSafetyTests.swift in Sources */,
 				DC33B7EFF60C51528CEBF876 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift in Sources */,

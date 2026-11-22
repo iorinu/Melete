@@ -182,6 +182,14 @@ struct MetricDefinitionEditForm: View {
                             Toggle(metric.isActive ? "入力欄で使用中" : "入力欄から外しています", isOn: $metric.isActive)
                                 .accessibilityIdentifier("metricDefinitionActive_\(metric.id.uuidString)")
                                 .toggleStyle(.switch)
+                            // 未保存の追加行だけに取消ボタンを出す。保存済み項目は削除できない。
+                            if metric.original == nil {
+                                let draftID = metric.id
+                                Button("追加を取り消す", systemImage: "minus.circle") {
+                                    metrics = MetricDefinitionEditing.removeUnsavedDraft(id: draftID, from: metrics)
+                                }
+                                .accessibilityIdentifier("cancelMetricDefinitionDraft_\(draftID.uuidString)")
+                            }
                         }
                         .padding(.vertical, 5)
                     }

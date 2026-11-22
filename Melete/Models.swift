@@ -141,6 +141,12 @@ enum MetricDefinitionEditing {
         exercise.metrics.sorted { $0.sortOrder == $1.sortOrder ? $0.id.uuidString < $1.id.uuidString : $0.sortOrder < $1.sortOrder }.map(MetricDefinitionDraft.init(existing:))
     }
 
+    // 未保存の追加行（original == nil）のうち、IDが一致する行だけを取り除く。
+    // 保存済み項目のIDや存在しないIDを渡した場合は何も消さず、残りの行の順序と入力内容は変えない。
+    static func removeUnsavedDraft(id: UUID, from drafts: [MetricDefinitionDraft]) -> [MetricDefinitionDraft] {
+        drafts.filter { !($0.id == id && $0.original == nil) }
+    }
+
     static func save(_ drafts: [MetricDefinitionDraft], for exercise: Exercise, insert: (MetricDefinition) -> Void = { _ in }, discard: (MetricDefinition) -> Void = { _ in }, persist: () throws -> Void) throws {
         let originalMetrics = exercise.metrics
         let originalSnapshots = originalMetrics.map(MetricDefinitionSnapshot.init)
