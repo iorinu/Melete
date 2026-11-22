@@ -26,6 +26,35 @@ enum ExerciseNameEditError: LocalizedError {
     var errorDescription: String? { "種目名を入力してください。" }
 }
 
+// 画面からの種目名保存境界。種目名はV2でもrevision対象外のため、通常V1と隔離V2で共用する。
+// clean contextのみ許可し、無関係な未保存変更をcontext.saveに巻き込まない。
+@MainActor enum ExerciseNameEditingInContext {
+    static func save(_ name: String, for exercise: Exercise, in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
+        // 拒否時は既存の未保存変更を破棄しないよう、rollbackせずにそのまま返す。
+        guard !context.hasChanges else { throw ExerciseNameEditingInContextError.unsavedContext }
+        guard exercise.modelContext === context else { throw ExerciseNameEditingInContextError.wrongContext }
+        do {
+            try ExerciseNameEditing.save(name, for: exercise) { try persist(context) }
+        } catch {
+            // cleanから開始しているため、共通saveが名前を復元した後にrollbackしてもcontextの変更は失われない。
+            context.rollback()
+            throw error
+        }
+    }
+}
+
+enum ExerciseNameEditingInContextError: LocalizedError, Equatable {
+    case unsavedContext
+    case wrongContext
+
+    var errorDescription: String? {
+        switch self {
+        case .unsavedContext: "未保存の変更があるため、種目名を保存できません。先に変更を保存するか、画面を開き直してください。"
+        case .wrongContext: "種目名の保存対象が現在のデータ画面に属していません。画面を開き直してください。"
+        }
+    }
+}
+
 struct MetricDefinitionDraft: Identifiable {
     let id: UUID
     let original: MetricDefinitionSnapshot?

@@ -613,7 +613,7 @@ struct MainView: View {
 
     private func saveExerciseName(_ name: String, for exercise: Exercise) -> String? {
         do {
-            try ExerciseNameEditing.save(name, for: exercise) { try context.save() }
+            try ExerciseNameEditingInContext.save(name, for: exercise, in: context)
             return nil
         } catch {
             return error.localizedDescription
