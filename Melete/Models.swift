@@ -1065,7 +1065,7 @@ enum WorkoutValueEditError: LocalizedError {
         case .setOrderOverflow: "セット番号の上限に達したため、セットを追加できません。"
         case .emptySetMetrics: "有効な項目がない種目には、空のセットを追加できません。"
         case .storedValueMismatch: "編集内容が保存済みの記録値と一致しません。画面を開き直してから再度お試しください。"
-        case .unsavedContext: "未保存の変更があるため、追加セットを保存できません。先に変更を保存するか、画面を開き直してください。"
+        case .unsavedContext: "未保存の変更があるため、運動記録を保存できません。先に変更を保存するか、画面を開き直してください。"
         case .workoutContextMismatch: "運動記録が現在のデータ画面に属していません。画面を開き直してください。"
         }
     }
@@ -1495,6 +1495,96 @@ enum MetricValueRevisionLinkingError: LocalizedError {
         case .valueAlreadyLinked: "値にはすでに項目改定リンクがあります。"
         case .duplicateRevision: "同じ項目の改定番号が重複しています。"
         case .snapshotMismatch: "項目定義と最新の項目改定が一致しません。履歴を確認してから保存してください。"
+        }
+    }
+}
+
+// V1の新規Workout保存境界。検証後は同じcontextから取得した参照だけで記録を構築する。
+@MainActor enum WorkoutCreationV1 {
+    static func save(day: Date, entries: [WorkoutEntryDraft], in context: ModelContext, calendar: Calendar = .current, persist: (ModelContext) throws -> Void = { try $0.save() }) throws -> Workout {
+        guard !context.hasChanges else { throw WorkoutCreationV1Error.unsavedContext }
+        guard calendar.startOfDay(for: day) <= calendar.startOfDay(for: .now), !entries.isEmpty,
+              Set(entries.map(\.exerciseID)).count == entries.count,
+              case let .success(validated) = WorkoutSetDraftEditing.validatedEntries(entries) else {
+            throw WorkoutCreationV1Error.invalidEntries
+        }
+
+        let readContext = ModelContext(context.container)
+        var liveExercises: [UUID: Exercise] = [:]
+        for entry in validated {
+            guard !entry.sets.isEmpty,
+                  Set(entry.metricSnapshots.map(\.id)).count == entry.metricSnapshots.count else {
+                throw WorkoutCreationV1Error.invalidEntries
+            }
+            let exerciseID = entry.exerciseID
+            let matches = try readContext.fetch(FetchDescriptor<Exercise>(predicate: #Predicate { $0.id == exerciseID }))
+            guard matches.count == 1, let live = matches.first, !live.isArchived,
+                  live.name == entry.exerciseName else { throw WorkoutCreationV1Error.staleDefinition }
+            let liveMetricIDs = live.metrics.map(\.id)
+            guard Set(liveMetricIDs).count == liveMetricIDs.count else { throw WorkoutCreationV1Error.staleDefinition }
+            let metrics = Self.sortedSnapshots(live.metrics.filter(\.isActive))
+            guard metrics == entry.metricSnapshots else { throw WorkoutCreationV1Error.staleDefinition }
+            guard live.metrics.allSatisfy({ $0.exercise?.id == live.id }) else { throw WorkoutCreationV1Error.staleDefinition }
+            let localMatches = try context.fetch(FetchDescriptor<Exercise>(predicate: #Predicate { $0.id == exerciseID }))
+            guard localMatches.count == 1, let local = localMatches.first, !local.isArchived,
+                  local.name == entry.exerciseName else {
+                throw WorkoutCreationV1Error.staleDefinition
+            }
+            let localMetricIDs = local.metrics.map(\.id)
+            guard Set(localMetricIDs).count == localMetricIDs.count,
+                  Self.sortedSnapshots(local.metrics.filter(\.isActive)) == entry.metricSnapshots else {
+                throw WorkoutCreationV1Error.staleDefinition
+            }
+            liveExercises[exerciseID] = local
+        }
+
+        let workout = Workout(day: day, records: [], calendar: calendar)
+        var records: [ExerciseRecord] = []
+        for (recordIndex, entry) in validated.enumerated() {
+            guard let live = liveExercises[entry.exerciseID] else { throw WorkoutCreationV1Error.staleDefinition }
+            var sets: [SetRecord] = []
+            for (setIndex, draft) in entry.sets.enumerated() {
+                var values: [MetricValue] = []
+                for metric in entry.metricSnapshots {
+                    guard let liveMetric = live.metrics.first(where: { $0.id == metric.id }) else {
+                        throw WorkoutCreationV1Error.staleDefinition
+                    }
+                    values.append(MetricValue(metric: liveMetric, scaledValue: draft.parsedValues[metric.id] ?? nil))
+                }
+                sets.append(SetRecord(sortOrder: setIndex + 1, values: values))
+            }
+            records.append(ExerciseRecord(exercise: live, sortOrder: recordIndex, sets: sets))
+        }
+        workout.records = records
+        do {
+            context.insert(workout)
+            try persist(context)
+            return workout
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+
+    private static func sortedSnapshots(_ metrics: [MetricDefinition]) -> [MetricDefinitionSnapshot] {
+        let snapshots: [MetricDefinitionSnapshot] = metrics.map(MetricDefinitionSnapshot.init)
+        return snapshots.sorted {
+            if $0.sortOrder == $1.sortOrder { return $0.id.uuidString < $1.id.uuidString }
+            return $0.sortOrder < $1.sortOrder
+        }
+    }
+}
+
+enum WorkoutCreationV1Error: LocalizedError {
+    case unsavedContext
+    case invalidEntries
+    case staleDefinition
+
+    var errorDescription: String? {
+        switch self {
+        case .unsavedContext: "未保存の変更があります。先に保存してから新しい運動記録を作成してください。"
+        case .invalidEntries: "入力内容を確認してください。"
+        case .staleDefinition: "種目または記録項目が変更されています。画面を開き直してください。"
         }
     }
 }

@@ -211,9 +211,30 @@ struct MetricDefinitionEditForm: View {
 struct WorkoutEntryDraft: Identifiable {
     let id = UUID()
     let exercise: Exercise
+    let exerciseID: UUID
+    let exerciseName: String
+    let exerciseWasArchived: Bool
+    let metricSnapshots: [MetricDefinitionSnapshot]
     var sets: [WorkoutSetDraft] = [WorkoutSetDraft()]
     // nilはV1またはV2 baseline未取得を表す。
     var historyBaseline: WorkoutEntryHistoryBaseline? = nil
+
+    init(exercise: Exercise) {
+        self.exercise = exercise
+        exerciseID = exercise.id
+        exerciseName = exercise.name
+        exerciseWasArchived = exercise.isArchived
+        metricSnapshots = Self.sortedSnapshots(exercise.metrics.filter(\.isActive).map(MetricDefinitionSnapshot.init))
+    }
+
+    private static func sortedSnapshots(_ snapshots: [MetricDefinitionSnapshot]) -> [MetricDefinitionSnapshot] {
+        snapshots.sorted(by: metricSnapshotOrder)
+    }
+
+    fileprivate static func metricSnapshotOrder(_ lhs: MetricDefinitionSnapshot, _ rhs: MetricDefinitionSnapshot) -> Bool {
+        if lhs.sortOrder == rhs.sortOrder { return lhs.id.uuidString < rhs.id.uuidString }
+        return lhs.sortOrder < rhs.sortOrder
+    }
 }
 
 struct WorkoutEntryHistoryBaseline: Equatable {
@@ -253,19 +274,26 @@ enum WorkoutSetDraftEditing {
 
     static func validatedEntries(_ entries: [WorkoutEntryDraft]) -> Result<[WorkoutEntryDraft], WorkoutSetDraftValidationError> {
         for entry in entries {
-            let metrics = entry.exercise.metrics.filter(\.isActive)
+            let metrics = entry.metricSnapshots
+            let activeDefinitions: [MetricDefinition] = entry.exercise.metrics.filter { $0.isActive }
+            let currentSnapshots: [MetricDefinitionSnapshot] = activeDefinitions.map { MetricDefinitionSnapshot($0) }
+            let currentMetrics = currentSnapshots.sorted(by: WorkoutEntryDraft.metricSnapshotOrder)
+            guard entry.exercise.id == entry.exerciseID, entry.exercise.name == entry.exerciseName,
+                  !entry.exerciseWasArchived, !entry.exercise.isArchived, currentMetrics == metrics else {
+                return .failure(WorkoutSetDraftValidationError(message: "\(entry.exerciseName)または記録項目が変更されています。入力内容はこの画面を開いている間は保持されますが、画面を閉じると消去されます。画面を開き直す前に数値を記録してください。"))
+            }
             guard !metrics.isEmpty else {
-                return .failure(WorkoutSetDraftValidationError(message: "\(entry.exercise.name)は有効な記録項目がないため、セットを保存できません。項目を復帰してから再度お試しください。"))
+                return .failure(WorkoutSetDraftValidationError(message: "\(entry.exerciseName)は有効な記録項目がないため、セットを保存できません。項目を復帰してから再度お試しください。"))
             }
             for (index, set) in entry.sets.enumerated() {
                 for metric in metrics {
                     let raw = set.values[metric.id] ?? ""
                     let value = raw.isEmpty ? nil : MetricInput.parse(raw, allowsDecimal: metric.allowsDecimal)
                     if !raw.isEmpty && value == nil {
-                        return .failure(WorkoutSetDraftValidationError(message: "\(entry.exercise.name)・セット\(index + 1)の「\(metric.name)」は0以上の有効な数値を入力してください。"))
+                        return .failure(WorkoutSetDraftValidationError(message: "\(entry.exerciseName)・セット\(index + 1)の「\(metric.name)」は0以上の有効な数値を入力してください。"))
                     }
                     if metric.isRequired && value == nil {
-                        return .failure(WorkoutSetDraftValidationError(message: "\(entry.exercise.name)・セット\(index + 1)の「\(metric.name)」は必須です。"))
+                        return .failure(WorkoutSetDraftValidationError(message: "\(entry.exerciseName)・セット\(index + 1)の「\(metric.name)」は必須です。"))
                     }
                 }
             }
@@ -274,7 +302,7 @@ enum WorkoutSetDraftEditing {
         for entryIndex in validatedEntries.indices {
             for setIndex in validatedEntries[entryIndex].sets.indices {
                 var parsed: [UUID: Int64?] = [:]
-                for metric in validatedEntries[entryIndex].exercise.metrics where metric.isActive {
+                for metric in validatedEntries[entryIndex].metricSnapshots {
                     let raw = validatedEntries[entryIndex].sets[setIndex].values[metric.id] ?? ""
                     parsed[metric.id] = raw.isEmpty ? nil : MetricInput.parse(raw, allowsDecimal: metric.allowsDecimal)
                 }
@@ -292,14 +320,14 @@ struct WorkoutSetDraftValidationError: Error {
 struct WorkoutForm: View {
     @Environment(\.dismiss) private var dismiss
     let exercises: [Exercise]
-    var onSave: (Date, [WorkoutEntryDraft]) -> Bool
+    var onSave: (Date, [WorkoutEntryDraft]) -> String?
     var makeEntryDraft: (Exercise) throws -> WorkoutEntryDraft
     @State private var day: Date
     @State private var entries: [WorkoutEntryDraft] = []
     @State private var selectedExerciseID: UUID?
     @State private var validationError: String?
 
-    init(exercises: [Exercise], initialDay: Date? = nil, makeEntryDraft: @escaping (Exercise) throws -> WorkoutEntryDraft = { WorkoutEntryDraft(exercise: $0) }, onSave: @escaping (Date, [WorkoutEntryDraft]) -> Bool) {
+    init(exercises: [Exercise], initialDay: Date? = nil, makeEntryDraft: @escaping (Exercise) throws -> WorkoutEntryDraft = { WorkoutEntryDraft(exercise: $0) }, onSave: @escaping (Date, [WorkoutEntryDraft]) -> String?) {
         self.exercises = exercises
         self.makeEntryDraft = makeEntryDraft
         self.onSave = onSave
@@ -354,10 +382,10 @@ struct WorkoutForm: View {
     }
 
     @ViewBuilder private func entryEditor(entry: Binding<WorkoutEntryDraft>) -> some View {
-        let metrics = entry.wrappedValue.exercise.metrics.filter(\.isActive).sorted { $0.sortOrder < $1.sortOrder }
+        let metrics = entry.wrappedValue.metricSnapshots
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(entry.wrappedValue.exercise.name).font(.headline)
+                Text(entry.wrappedValue.exerciseName).font(.headline)
                 Spacer()
                 Button("種目を外す", role: .destructive) {
                     entries.removeAll { $0.id == entry.wrappedValue.id }
@@ -376,11 +404,11 @@ struct WorkoutForm: View {
                             Button("削除", role: .destructive) { WorkoutSetDraftEditing.remove(entryID: entry.wrappedValue.id, setID: set.id, from: &entries) }
                         }
                     }
-                    ForEach(metrics) { metric in
+                    ForEach(metrics, id: \.id) { metric in
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
                             Text("\(metric.name)（\(metric.unit)）\(metric.isRequired ? "*" : "" )")
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            TextField(metric.allowsDecimal ? "0.000まで" : "0以上の整数", text: valueBinding(entry: entry, setID: set.id, metric: metric))
+                            TextField(metric.allowsDecimal ? "0.000まで" : "0以上の整数", text: valueBinding(entry: entry, setID: set.id, metric: metric.id))
                                 .frame(minWidth: 100, maxWidth: 180)
                                 .textFieldStyle(.roundedBorder)
                                 .accessibilityIdentifier("set\(setIndex + 1)_metric_\(metric.name)")
@@ -396,12 +424,12 @@ struct WorkoutForm: View {
         }.padding(.vertical, 8)
     }
 
-    private func valueBinding(entry: Binding<WorkoutEntryDraft>, setID: UUID, metric: MetricDefinition) -> Binding<String> {
+    private func valueBinding(entry: Binding<WorkoutEntryDraft>, setID: UUID, metric: UUID) -> Binding<String> {
         Binding(get: {
-            entry.wrappedValue.sets.first(where: { $0.id == setID })?.values[metric.id] ?? ""
+            entry.wrappedValue.sets.first(where: { $0.id == setID })?.values[metric] ?? ""
         }, set: { text in
             guard let index = entry.wrappedValue.sets.firstIndex(where: { $0.id == setID }) else { return }
-            entry.wrappedValue.sets[index].values[metric.id] = text
+            entry.wrappedValue.sets[index].values[metric] = text
         })
     }
 
@@ -422,8 +450,11 @@ struct WorkoutForm: View {
         case .failure(let error): validationError = error.message; return
         case .success(let result): validatedEntries = result
         }
-        guard onSave(day, validatedEntries) else { return }
-        dismiss()
+        if let error = onSave(day, validatedEntries) {
+            validationError = error
+        } else {
+            dismiss()
+        }
     }
 
     private static func parseValue(_ text: String, allowsDecimal: Bool) -> Int64? {

@@ -648,15 +648,13 @@ struct MainView: View {
         }
     }
 
-    private func saveWorkout(day: Date, entries: [WorkoutEntryDraft]) -> Bool {
+    private func saveWorkout(day: Date, entries: [WorkoutEntryDraft]) -> String? {
         if storeMode == .isolatedV2Experimental {
-            do { try WorkoutWritingServiceV2(context: context).createWorkout(day: day, entries: entries); return true }
-            catch { errorMessage = error.localizedDescription; return false }
+            do { try WorkoutWritingServiceV2(context: context).createWorkout(day: day, entries: entries); return nil }
+            catch { return error.localizedDescription }
         }
-        let workout = Workout(day: day, records: Self.workoutRecords(from: entries))
-        context.insert(workout)
-        do { try context.save(); return true }
-        catch { context.rollback(); errorMessage = error.localizedDescription; return false }
+        do { try WorkoutCreationV1.save(day: day, entries: entries, in: context); return nil }
+        catch { return error.localizedDescription }
     }
 
     static func workoutRecords(from entries: [WorkoutEntryDraft]) -> [ExerciseRecord] {
@@ -675,10 +673,8 @@ struct MainView: View {
         do {
             if storeMode == .isolatedV2Experimental {
                 try WorkoutWritingServiceV2(context: context).saveWorkoutEdits(drafts, additions: additions, day: day, to: workout, exercises: exercises)
-            } else if !additions.isEmpty {
-                try WorkoutSetAdditionV1.save(drafts, additions: additions, baseline: baseline, day: day, to: workout, exercises: exercises, in: context)
             } else {
-                try WorkoutValueEditing.save(drafts, additions: [], day: day, to: workout, exercises: exercises, discard: { context.delete($0) }) { try context.save() }
+                try WorkoutSetAdditionV1.save(drafts, additions: additions, baseline: baseline, day: day, to: workout, exercises: exercises, in: context)
             }
             return nil
         } catch {
