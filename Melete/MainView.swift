@@ -599,13 +599,13 @@ struct MainView: View {
         return formatter.string(from: date)
     }
 
-    private func saveExercise(name: String, metrics: [MetricDraft]) -> Bool {
-        let definitions = metrics.enumerated().map { index, metric in
-            MetricDefinition(name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: index)
+    private func saveExercise(name: String, metrics: [MetricDraft]) -> String? {
+        do {
+            try ExerciseCreationInContext.save(name: name, metrics: metrics, in: context)
+            return nil
+        } catch {
+            return error.localizedDescription
         }
-        context.insert(Exercise(name: name, metrics: definitions))
-        do { try context.save(); return true }
-        catch { context.rollback(); errorMessage = error.localizedDescription; return false }
     }
 
     private func saveExerciseName(_ name: String, for exercise: Exercise) -> String? {

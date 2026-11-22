@@ -14,7 +14,8 @@ struct MetricDraft: Identifiable {
 
 struct ExerciseForm: View {
     @Environment(\.dismiss) private var dismiss
-    var onSave: (String, [MetricDraft]) -> Bool
+    // 保存失敗時はエラーメッセージを返す。親のalertはsheetの裏に隠れることがあるため、フォーム内に表示する。
+    var onSave: (String, [MetricDraft]) -> String?
     @State private var name = ""
     @State private var metrics = [MetricDraft()]
     @State private var validationError: String?
@@ -74,7 +75,8 @@ struct ExerciseForm: View {
                         validationError = "種目名・項目名・単位を入力してください。項目名は重複できません。"
                         return
                     }
-                    if onSave(cleanedName, cleanedMetrics) { dismiss() }
+                    // 成功時だけ閉じ、失敗時は入力を残したままエラーを表示して再試行できるようにする。
+                    if let error = onSave(cleanedName, cleanedMetrics) { validationError = error } else { dismiss() }
                 }.keyboardShortcut(.defaultAction).accessibilityIdentifier("saveExerciseButton")
             }
         }.padding(26).frame(minWidth: 570, idealWidth: 610, minHeight: 520, idealHeight: 590)

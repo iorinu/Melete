@@ -87,6 +87,40 @@ enum ExerciseArchiveToggleInContextError: LocalizedError, Equatable {
     }
 }
 
+// 画面からの種目新規作成境界。新しい種目と項目定義はV1/V2共通のため、通常V1と隔離V2で共用する。
+// clean contextのみ許可し、無関係な未保存変更をcontext.saveに巻き込まない。
+@MainActor enum ExerciseCreationInContext {
+    @discardableResult
+    static func save(name: String, metrics: [MetricDraft], in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws -> Exercise {
+        // モデルを作成・挿入する前に判定する。拒否時は既存の未保存変更を破棄しないよう、rollbackせずにそのまま返す。
+        guard !context.hasChanges else { throw ExerciseCreationInContextError.unsavedContext }
+        // 入力順をsortOrderとして項目定義を作る。
+        let definitions = metrics.enumerated().map { index, metric in
+            MetricDefinition(name: metric.name, unit: metric.unit, allowsDecimal: metric.allowsDecimal, isRequired: metric.isRequired, sortOrder: index)
+        }
+        let exercise = Exercise(name: name, metrics: definitions)
+        context.insert(exercise)
+        do {
+            try persist(context)
+            return exercise
+        } catch {
+            // cleanから開始しているため、rollbackで取り消されるのは今回挿入した種目と項目定義だけになる。
+            context.rollback()
+            throw error
+        }
+    }
+}
+
+enum ExerciseCreationInContextError: LocalizedError, Equatable {
+    case unsavedContext
+
+    var errorDescription: String? {
+        switch self {
+        case .unsavedContext: "未保存の変更があるため、種目を作成できません。先に変更を保存するか、画面を開き直してください。"
+        }
+    }
+}
+
 struct MetricDefinitionDraft: Identifiable {
     let id: UUID
     let original: MetricDefinitionSnapshot?
