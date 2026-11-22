@@ -55,6 +55,38 @@ enum ExerciseNameEditingInContextError: LocalizedError, Equatable {
     }
 }
 
+// 画面からの種目アーカイブ切替境界。isArchivedはV2でもrevision対象外のため、通常V1と隔離V2で共用する。
+// clean contextのみ許可し、無関係な未保存変更をcontext.saveに巻き込まない。
+@MainActor enum ExerciseArchiveToggleInContext {
+    static func toggle(_ exercise: Exercise, in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws {
+        // 拒否時は既存の未保存変更を破棄しないよう、rollbackせずにそのまま返す。
+        guard !context.hasChanges else { throw ExerciseArchiveToggleInContextError.unsavedContext }
+        guard exercise.modelContext === context else { throw ExerciseArchiveToggleInContextError.wrongContext }
+        let original = exercise.isArchived
+        exercise.isArchived.toggle()
+        do {
+            try persist(context)
+        } catch {
+            // 元値を戻してからrollbackする。cleanから開始しているため、contextの他の変更は失われない。
+            exercise.isArchived = original
+            context.rollback()
+            throw error
+        }
+    }
+}
+
+enum ExerciseArchiveToggleInContextError: LocalizedError, Equatable {
+    case unsavedContext
+    case wrongContext
+
+    var errorDescription: String? {
+        switch self {
+        case .unsavedContext: "未保存の変更があるため、アーカイブ状態を切り替えられません。先に変更を保存するか、画面を開き直してください。"
+        case .wrongContext: "アーカイブ切替の対象が現在のデータ画面に属していません。画面を開き直してください。"
+        }
+    }
+}
+
 struct MetricDefinitionDraft: Identifiable {
     let id: UUID
     let original: MetricDefinitionSnapshot?

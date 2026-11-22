@@ -573,12 +573,9 @@ struct MainView: View {
                 .accessibilityIdentifier("manageMetricDefinitions_\(exercise.id.uuidString)")
             Button("名前を編集", systemImage: "pencil") { editingExercise = exercise }
             Button(exercise.isArchived ? "復帰" : "アーカイブ") {
-                let original = exercise.isArchived
                 do {
-                    exercise.isArchived.toggle()
-                    try context.save()
+                    try ExerciseArchiveToggleInContext.toggle(exercise, in: context)
                 } catch {
-                    exercise.isArchived = original
                     errorMessage = error.localizedDescription
                 }
             }
