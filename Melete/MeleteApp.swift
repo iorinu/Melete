@@ -9,9 +9,14 @@ struct MeleteApp: App {
     private let startupError: String?
     private let isolatedStoreActive: Bool
     private let storeMode: MainView.StoreMode
+    private let scratchProcessMarker: String?
 
     init() {
         do {
+            var resolvedContainer: ModelContainer?
+            var resolvedIsolatedStoreActive = false
+            var resolvedStoreMode: MainView.StoreMode = .v1
+            var resolvedScratchProcessMarker: String?
             let arguments = ProcessInfo.processInfo.arguments
 #if DEBUG
             let isolatedStoreURL = Self.isolatedStoreURLFromLaunchArguments(arguments: arguments)
@@ -23,23 +28,39 @@ struct MeleteApp: App {
             var usingIsolatedStore = false
             var selectedMode: MainView.StoreMode = .v1
             guard route != .error else { throw StartupError.invalidUITestStore }
+#if DEBUG && MELETE_SCRATCH_ISOLATION
+            // 失敗し得る証拠の検証は、プロパティとModelContainerを確定する前に行う
+            if route == .isolatedV2 {
+                guard let evidence = Self.scratchEvidence(arguments: arguments) else {
+                    throw StartupError.invalidUITestStore
+                }
+                resolvedScratchProcessMarker = evidence
+            }
+#endif
 #if DEBUG
             if route == .isolatedV1 || route == .isolatedV2 {
                 guard let isolatedStoreURL else { throw StartupError.invalidUITestStore }
                 if route == .isolatedV2 {
                     let schema = Schema(versionedSchema: MeleteSchemaV2.self)
                     configuration = ModelConfiguration("MeleteUITestV2", schema: schema, url: isolatedStoreURL, cloudKitDatabase: .none)
-                    container = try ModelContainer(for: schema, migrationPlan: MeleteMigrationPlan.self, configurations: [configuration])
+                    do {
+                        resolvedContainer = try ModelContainer(for: schema, migrationPlan: MeleteMigrationPlan.self, configurations: [configuration])
+                    } catch {
+#if MELETE_SCRATCH_ISOLATION
+                        // SwiftDataの詳細エラーにはパス等が含まれ得るため、scratch専用画面には出さない
+                        throw StartupError.scratchStoreOpenFailed
+#else
+                        throw error
+#endif
+                    }
                     selectedMode = .isolatedV2Experimental
                 } else {
                     let schema = Schema(versionedSchema: MeleteSchemaV1.self)
                     configuration = ModelConfiguration("MeleteUITest", schema: schema, url: isolatedStoreURL, cloudKitDatabase: .none)
-                    container = try ModelContainer(for: schema, configurations: [configuration])
+                    resolvedContainer = try ModelContainer(for: schema, configurations: [configuration])
                 }
                 usingIsolatedStore = true
-            } else if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-                        || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
-                        || NSClassFromString("XCTestCase") != nil {
+            } else if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil || NSClassFromString("XCTestCase") != nil {
                 throw StartupError.invalidUITestStore
             } else {
 #if MELETE_SCRATCH_ISOLATION
@@ -48,36 +69,64 @@ struct MeleteApp: App {
 #else
                 let schema = Schema(versionedSchema: MeleteSchemaV1.self)
                 configuration = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
-                container = try ModelContainer(for: schema, configurations: [configuration])
+                resolvedContainer = try ModelContainer(for: schema, configurations: [configuration])
 #endif
             }
 #else
             let schema = Schema(versionedSchema: MeleteSchemaV1.self)
             configuration = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
-            container = try ModelContainer(for: schema, configurations: [configuration])
+            resolvedContainer = try ModelContainer(for: schema, configurations: [configuration])
 #endif
-            isolatedStoreActive = usingIsolatedStore
-            storeMode = selectedMode
+            resolvedIsolatedStoreActive = usingIsolatedStore
+            resolvedStoreMode = selectedMode
+            container = resolvedContainer
+            isolatedStoreActive = resolvedIsolatedStoreActive
+            storeMode = resolvedStoreMode
+            scratchProcessMarker = resolvedScratchProcessMarker
             startupError = nil
         } catch {
             container = nil
             isolatedStoreActive = false
             storeMode = .v1
+            scratchProcessMarker = nil
             startupError = error.localizedDescription
         }
     }
 
 #if DEBUG
     private static func isolatedStoreURLFromLaunchArguments(arguments: [String]) -> URL? {
+#if MELETE_SCRATCH_ISOLATION
+        let flags = ["--melete-ui-test-root", "--melete-ui-test-store", "--melete-v2-experimental"]
+        let values = Array(arguments.dropFirst())
+        guard values.filter({ $0 == "--melete-ui-test-root" }).count == 1,
+              values.filter({ $0 == "--melete-ui-test-store" }).count == 1,
+              values.filter({ $0 == "--melete-v2-experimental" }).count == 1,
+              !values.contains(where: { $0.hasPrefix("--melete-") && !flags.contains($0) }) else { return nil }
+#endif
         guard arguments.contains("--melete-ui-test-root") || arguments.contains("--melete-ui-test-store") || arguments.contains("--melete-v2-experimental") else { return nil }
         return UITestStoreIsolation.storeURL(arguments: arguments)
     }
+
+#if MELETE_SCRATCH_ISOLATION
+    private static func scratchEvidence(arguments: [String]) -> String? {
+        guard let storeURL = UITestStoreIsolation.storeURL(arguments: arguments),
+              let marker = try? String(contentsOf: storeURL.deletingLastPathComponent().appendingPathComponent(UITestStoreIsolation.storeMarker), encoding: .utf8),
+              let uuid = UUID(uuidString: marker) else { return nil }
+        return "melete-scratch-evidence-\(uuid.uuidString)-pid-\(ProcessInfo.processInfo.processIdentifier)"
+    }
+#endif
 #endif
 
     private enum StartupError: LocalizedError {
         case invalidUITestStore
+        case scratchStoreOpenFailed
         var errorDescription: String? {
-            "UIテスト用ストアの指定が安全な一時ディレクトリではありません。データは開いていません。"
+            switch self {
+            case .invalidUITestStore:
+                return "UIテスト用ストアの指定が安全な一時ディレクトリではありません。データは開いていません。"
+            case .scratchStoreOpenFailed:
+                return "隔離されたscratchストアを開けませんでした。詳細情報は表示していません。データは初期化されていません。"
+            }
         }
     }
 
@@ -99,6 +148,13 @@ struct MeleteApp: App {
                                 .accessibilityIdentifier("melete-experimental-v2-active")
                                 .padding(4)
                         }
+#if DEBUG && MELETE_SCRATCH_ISOLATION
+                        if let scratchProcessMarker {
+                            Text(scratchProcessMarker)
+                                .accessibilityIdentifier("melete-scratch-process-evidence")
+                                .accessibilityHidden(false)
+                        }
+#endif
 #endif
                         MainView(storeMode: storeMode).modelContainer(container)
                     }

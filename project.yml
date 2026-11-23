@@ -38,6 +38,8 @@ targets:
     platform: macOS
     sources:
       - path: MeleteTests
+      # ScratchProbeの照合ロジックをUIテストと同じソースで単体テストする
+      - path: TestsShared/ScratchEvidencePolicy.swift
     dependencies:
       - target: Melete
     settings:
@@ -48,6 +50,7 @@ targets:
     platform: macOS
     sources:
       - path: MeleteUITests
+      - path: TestsShared/ScratchEvidencePolicy.swift
     dependencies:
       - target: Melete
     settings:
