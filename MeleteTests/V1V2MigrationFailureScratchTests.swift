@@ -12,6 +12,7 @@ import XCTest
 /// scratch直下に新しいUUID fixtureだけを作り、削除・上書き・system temporary directory利用をしない。
 /// 同一UIDの悪意ある別プロセスによるパス置換は脅威モデル対象外（ユーザー承認済み）。
 /// 誤操作・symlink/hardlinkの取り違え・read-write ModelContainerの重複openは、各フェーズ間のgateで検出して停止する。
+/// ただしfd残存の検出は fd番号 0..<rlim_cur の範囲に限られる（StoreLifetimeProbe.openDescriptorCounts参照）。
 final class V1V2MigrationFailureScratchTests: XCTestCase {
     private enum InjectedFailure: Error { case expected }
     private static var failurePhaseWasInvoked = false
@@ -20,6 +21,7 @@ final class V1V2MigrationFailureScratchTests: XCTestCase {
         // フェーズ間のlifetime gate（container解放・fixture内ファイルへのfd残存・inode固定）は実装済みだが、
         // 一度も実行されておらず、SwiftDataがcontainer解放時にSQLite接続を閉じることを観測で確かめていない。
         // V1V2MigrationFailureLifetimeProbeTests でgate自体の動作を確認するまで、I/O前の無条件skipを維持する。
+        // fd走査も 0..<rlim_cur だけで、soft limit引き下げ後に残る高い番号のfdを見逃しうる（全fdの保証ではない）。
         throw XCTSkip("SwiftData read-write ModelContainerのlifetime gateが未実行・未検証のため停止中")
     }
 
@@ -67,16 +69,16 @@ final class V1V2MigrationFailureScratchTests: XCTestCase {
         func gate(_ phase: String) throws {
             try StoreLifetimeProbe.requirePhaseClosed(phase, directory: directory, directoryIdentity: directoryIdentity, pinned: pinned)
         }
-        // mkdir直後は空であること（既存ファイルを再利用しない）
+        // mkdir直後は空であること（既存ファイルを再利用しない）。XCTAssertでは続行してしまうのでthrowで止める
         try gate("fixture directory作成直後")
-        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty, "新規fixture directoryは空")
+        try StoreLifetimeProbe.requireEmptyDirectory(directory, phase: "fixture directory作成直後")
 
         let store = directory.appendingPathComponent(StoreLifetimeProbe.sourceName)
         let backup = directory.appendingPathComponent(StoreLifetimeProbe.backupName)
         let restoredURL = directory.appendingPathComponent(StoreLifetimeProbe.restoredName)
         let schema = Schema(versionedSchema: MeleteSchemaV1.self)
-        let sourceConfig = ModelConfiguration("MigrationFailureV1Source", schema: schema, url: store, cloudKitDatabase: .none)
-        XCTAssertEqual(sourceConfig.url.standardizedFileURL, store.standardizedFileURL, "V1 sourceをfixture URLに固定しfallbackを許さない")
+        // V1 sourceをfixture URLに固定し、一致しなければcontainerを開く前に止める（fallbackを許さない）
+        let sourceConfig = try StoreLifetimeProbe.pinnedConfiguration("MigrationFailureV1Source", schema: schema, url: store)
         let exerciseID = UUID(), metricID = UUID(), workoutID = UUID(), recordID = UUID(), setID = UUID()
         let nilValueID = UUID(), zeroValueID = UUID()
         let exerciseCreatedAt = Date(timeIntervalSince1970: 1_650_000_000)
@@ -126,8 +128,8 @@ final class V1V2MigrationFailureScratchTests: XCTestCase {
 
         // フェーズ4: これは失敗を明示注入したテスト専用planであり、本番 MeleteMigrationPlan の失敗ではない。
         let candidateSchema = Schema(versionedSchema: MeleteSchemaV2.self)
-        let candidateConfig = ModelConfiguration("MigrationFailureInjectedCandidate", schema: candidateSchema, url: store, cloudKitDatabase: .none)
-        XCTAssertEqual(candidateConfig.url.standardizedFileURL, store.standardizedFileURL, "candidateもfixture URLに固定しfallbackを許さない")
+        // candidateもfixture URLに固定し、一致しなければ移行を試す前に止める
+        let candidateConfig = try StoreLifetimeProbe.pinnedConfiguration("MigrationFailureInjectedCandidate", schema: candidateSchema, url: store)
         Self.failurePhaseWasInvoked = false
         var candidateOpenThrew = false
         // 失敗経路でCore Data内部のautoreleaseオブジェクトが接続を保持し続けないよう、poolを閉じてからgateを通す
@@ -151,20 +153,22 @@ final class V1V2MigrationFailureScratchTests: XCTestCase {
         try gate("移行失敗後V1読み戻し後")
         try Self.requireIntegrity(store)
         try gate("移行失敗後integrity_check後")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: restoredURL.path), "restore先は新規URL")
+        // restore先は新規URL。onlineBackupもO_EXCLで拒否するが、ここでも続行せず止める
+        guard !FileManager.default.fileExists(atPath: restoredURL.path) else {
+            throw FailureTestError.invalidBackupPath
+        }
         try Self.onlineBackup(from: backup, toNew: restoredURL)
         pinned[StoreLifetimeProbe.restoredName] = try StoreLifetimeProbe.identity(ofRegularFileAt: restoredURL)
         try gate("restore作成後")
         try Self.requireIntegrity(restoredURL)
         try gate("restore integrity_check後")
-        let restoredConfig = ModelConfiguration("MigrationFailureV1Restored", schema: schema, url: restoredURL, cloudKitDatabase: .none)
-        XCTAssertEqual(restoredConfig.url.standardizedFileURL, restoredURL.standardizedFileURL)
+        // restore先のURL固定はassertValues内のpinnedConfigurationで、container open前に確認する
         try Self.assertValues(at: restoredURL, schema: schema, configName: "MigrationFailureV1Restored", ids: fixtureIDs)
         try gate("restore読み戻し後")
 
         // ローカル関数は囲んでいる@MainActorのテストメソッドのisolationを引き継ぐ
         func assertIDsAndValues(_ url: URL, _ label: String) throws {
-            let config = ModelConfiguration(label, schema: schema, url: url, cloudKitDatabase: .none)
+            let config = try StoreLifetimeProbe.pinnedConfiguration(label, schema: schema, url: url)
             try StoreLifetimeProbe.withReleasedContainer(label, schema: schema, configuration: config) { context in
                 let exercises = try context.fetch(FetchDescriptor<Exercise>())
                 let workouts = try context.fetch(FetchDescriptor<Workout>())
@@ -192,7 +196,7 @@ final class V1V2MigrationFailureScratchTests: XCTestCase {
 
     @MainActor
     private static func assertValues(at url: URL, schema: Schema, configName: String, ids: FixtureIDs) throws {
-        let configuration = ModelConfiguration(configName, schema: schema, url: url, cloudKitDatabase: .none)
+        let configuration = try StoreLifetimeProbe.pinnedConfiguration(configName, schema: schema, url: url)
         try StoreLifetimeProbe.withReleasedContainer(configName, schema: schema, configuration: configuration) { context in
             let exercises = try context.fetch(FetchDescriptor<Exercise>())
             let metrics = try context.fetch(FetchDescriptor<MetricDefinition>())
@@ -444,6 +448,50 @@ final class V1V2MigrationFailureLifetimeProbeTests: XCTestCase {
         XCTAssertNoThrow(try SQLiteIntegrityCheck.require(rows: ["ok"], label: "合成"))
     }
 
+    /// 新規fixture directoryに1件でも名前があれば、XCTAssertで続行せずthrowすること。
+    /// ディレクトリは読まず、合成した名前一覧だけを渡す
+    func testEmptyListingRequirementStopsOnAnyEntry() {
+        let nonEmptyListings: [[String]] = [
+            [StoreLifetimeProbe.sourceName], [StoreLifetimeProbe.sourceName + "-wal"],
+            [".DS_Store"], ["unexpected"], ["a", "b"],
+        ]
+        for names in nonEmptyListings {
+            XCTAssertThrowsError(try StoreLifetimeProbe.requireEmptyListing(names, phase: "合成"), "\(names) は停止") { error in
+                guard case FailureTestError.directoryNotEmpty = error else {
+                    return XCTFail("空でないdirectoryとして停止する: \(error)")
+                }
+            }
+        }
+        XCTAssertNoThrow(try StoreLifetimeProbe.requireEmptyListing([], phase: "合成"))
+    }
+
+    /// ModelConfigurationのURLがfixture URLと違えば、containerを開く前にthrowすること。
+    /// 存在しない合成パスの値だけを比べる（isDirectory指定でURL生成時のファイルシステム確認も避ける）
+    func testConfigurationURLRequirementStopsOnMismatch() {
+        let expected = URL(fileURLWithPath: "/melete-synthetic-nonexistent/fixture/source.sqlite", isDirectory: false)
+        let mismatches: [URL] = [
+            URL(fileURLWithPath: "/melete-synthetic-nonexistent/fixture/backup.sqlite", isDirectory: false),
+            URL(fileURLWithPath: "/melete-synthetic-nonexistent/other/source.sqlite", isDirectory: false),
+            // in-memory store等が使う別の場所へのfallbackを想定
+            URL(fileURLWithPath: "/dev/null", isDirectory: false),
+            URL(string: "https://example.invalid/melete-synthetic-nonexistent/fixture/source.sqlite")!,
+        ]
+        for actual in mismatches {
+            XCTAssertThrowsError(try StoreLifetimeProbe.requireSameFileURL(actual, expected: expected, label: "合成"), "\(actual) は停止") { error in
+                guard case FailureTestError.configurationURLMismatch = error else {
+                    return XCTFail("URL不一致として停止する: \(error)")
+                }
+            }
+        }
+        // 期待値側が非file URLでも一致扱いにしない
+        let nonFile = URL(string: "https://example.invalid/source.sqlite")!
+        XCTAssertThrowsError(try StoreLifetimeProbe.requireSameFileURL(nonFile, expected: nonFile, label: "合成"))
+        XCTAssertNoThrow(try StoreLifetimeProbe.requireSameFileURL(expected, expected: expected, label: "合成"))
+        // ".."は字句的に標準化されてから比べる
+        let dotted = URL(fileURLWithPath: "/melete-synthetic-nonexistent/fixture/sub/../source.sqlite", isDirectory: false)
+        XCTAssertNoThrow(try StoreLifetimeProbe.requireSameFileURL(dotted, expected: expected, label: "合成"))
+    }
+
     /// ファイルを作らない :memory: DBで、実際のPRAGMA結果の読み取りと判定がつながっていることを確認する
     func testIntegrityCheckReadsOKFromInMemoryDatabase() throws {
         var database: OpaquePointer?
@@ -495,6 +543,34 @@ private enum StoreLifetimeProbe {
         }
     }
 
+    /// 名前一覧が空であることを要求する。1件でもあれば既存ファイルを再利用しうるので、次のI/O前に停止する
+    static func requireEmptyListing(_ names: [String], phase: String) throws {
+        guard names.isEmpty else {
+            throw FailureTestError.directoryNotEmpty("\(phase): \(names.sorted())")
+        }
+    }
+
+    /// 作成直後のfixture directoryが空であることを要求する（読み取りのみ）
+    static func requireEmptyDirectory(_ directory: URL, phase: String) throws {
+        try requireEmptyListing(try FileManager.default.contentsOfDirectory(atPath: directory.path), phase: phase)
+    }
+
+    /// ModelConfigurationが持つURLが、意図したfixture URLと一致することを要求する。
+    /// 一致しなければ既定ストア等の別の場所を開くおそれがあるため、containerを開く前に停止する
+    static func requireSameFileURL(_ actual: URL, expected: URL, label: String) throws {
+        guard actual.isFileURL, expected.isFileURL,
+              actual.standardizedFileURL == expected.standardizedFileURL else {
+            throw FailureTestError.configurationURLMismatch(label)
+        }
+    }
+
+    /// fixture URLに固定したModelConfigurationを作る。URLが一致しなければ返さずにthrowする
+    static func pinnedConfiguration(_ name: String, schema: Schema, url: URL) throws -> ModelConfiguration {
+        let configuration = ModelConfiguration(name, schema: schema, url: url, cloudKitDatabase: .none)
+        try requireSameFileURL(configuration.url, expected: url, label: name)
+        return configuration
+    }
+
     /// symlinkをたどらずに調べ、通常ファイル・hardlink 1本・自分の所有の場合だけinodeを返す
     static func identity(ofRegularFileAt url: URL) throws -> FileIdentity {
         var info = stat()
@@ -507,8 +583,11 @@ private enum StoreLifetimeProbe {
         return FileIdentity(info)
     }
 
-    /// このプロセスが開いている全fdを走査し、inodeごとの本数を返す。
+    /// fd番号 0..<RLIMIT_NOFILEのsoft limit(rlim_cur) を走査し、inodeごとの本数を返す。
     /// fstatは状態を変えない。走査範囲が決められない場合やEBADF以外のfstat失敗は判定不能として停止する（fail closed）。
+    /// 注意: これは「全fd」の走査ではない。soft limitを引き下げても既に開いている高い番号のfdは閉じられないため、
+    /// プロセス内でlimitが下げられていると rlim_cur 以上のfdを見逃す。fd残存なしの保証としては不十分で、
+    /// 実際に開いているfdを列挙する方法（例: libprocのPROC_PIDLISTFDS）に置き換えるまで本体の無条件skipを外さない。
     static func openDescriptorCounts() throws -> [FileIdentity: Int] {
         var limit = rlimit()
         guard getrlimit(RLIMIT_NOFILE, &limit) == 0,
@@ -559,7 +638,7 @@ private enum StoreLifetimeProbe {
     /// - directoryが作成時と同じinodeで、所有者・権限が変わっていない
     /// - 中身が許可した名前だけで、全て通常ファイル・hardlink 1本
     /// - 作成済みのstore/backup/restoreが作成時と同じinodeのまま
-    /// - fixture内のどのファイルも、このプロセスのfdで開かれていない
+    /// - fixture内のどのファイルも、fd番号 0..<rlim_cur の範囲では開かれていない（rlim_cur以上は未確認）
     static func requirePhaseClosed(_ phase: String, directory: URL, directoryIdentity: FileIdentity, pinned: [String: FileIdentity]) throws {
         var directoryInfo = stat()
         guard lstat(directory.path, &directoryInfo) == 0,
@@ -593,6 +672,8 @@ private enum FailureTestError: Error {
     case descriptorStatFailed(fd: Int32, errno: Int32)
     case integrityCheckFailed(String)
     case containerStillAlive(String)
+    case directoryNotEmpty(String)
+    case configurationURLMismatch(String)
     case openDescriptor(String)
     case unexpectedFile(String)
     case identityChanged(String)
