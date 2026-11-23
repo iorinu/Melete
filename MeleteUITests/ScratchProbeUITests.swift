@@ -288,7 +288,12 @@ private extension ScratchProbeUITests {
     }
 
     func launchSafely(phase: String) -> XCUIApplication? {
-        let app = XCUIApplication(bundleIdentifier: Self.scratchBundleIdentifier)
+        // locateで検査済みのMelete.appのファイルURLを指定し、bundle IDだけによる起動対象の曖昧さを狭める。
+        // ただしこれで起動が安全になったわけではない（未解決）:
+        // - launch()は同じアプリの既存インスタンスを終了させ得る（起動前の同一bundle ID拒否はそのため維持する）
+        // - 確認から起動までの間に同じUIDの別プロセスが割り込むレース
+        // - 起動したプロセスとUI証拠のPIDの結び付け（PID binding）は起動後の照合に頼っており、証明されていない
+        let app = XCUIApplication(url: target.appURL)
         app.launchArguments = expectedLaunchArguments
         guard verifyBeforeLaunch(app, phase: phase) else { return nil }
         guard noRunningScratchApplication(phase: phase) else { return nil }
@@ -660,9 +665,11 @@ private extension XCUIElement {
 
 // MARK: - 起動対象アプリ
 
-/// XCUIApplication()が起動するテスト対象アプリ。runnerと同じBuild/Products/ScratchProbeにあるMelete.appを想定し、
+/// 起動するテスト対象アプリ。runnerと同じBuild/Products/ScratchProbeにあるMelete.appを想定し、
 /// 配置やbundle IDが想定と違えば起動しない（推測で別のアプリを起動しない）。
 private struct ScratchTargetApp {
+    /// locateで検査した、シンボリックリンク解決・標準化済みのMelete.appのファイルURL。起動にはこのURLを使う
+    let appURL: URL
     let executablePath: String
 
     enum LocateError: Error {
@@ -687,7 +694,8 @@ private struct ScratchTargetApp {
               bundle.bundleIdentifier == expectedBundleIdentifier,
               let executable = bundle.executableURL?.resolvingSymlinksInPath().standardizedFileURL,
               executable.path.hasPrefix(appURL.path + "/") else { throw LocateError.unexpectedBundle }
-        return ScratchTargetApp(executablePath: executable.path)
+        // 検査に使ったURLをそのまま保持する（起動時に別の方法で探し直さない）
+        return ScratchTargetApp(appURL: appURL, executablePath: executable.path)
     }
 }
 
