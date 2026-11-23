@@ -12,7 +12,7 @@ import XCTest
 /// scratch直下に新しいUUID fixtureだけを作り、削除・上書き・system temporary directory利用をしない。
 /// 同一UIDの悪意ある別プロセスによるパス置換は脅威モデル対象外（ユーザー承認済み）。
 /// 誤操作・symlink/hardlinkの取り違え・read-write ModelContainerの重複openは、各フェーズ間のgateで検出して停止する。
-/// ただしfd残存の検出は fd番号 0..<rlim_cur の範囲に限られる（StoreLifetimeProbe.openDescriptorCounts参照）。
+/// fd残存の検出はlibprocのPROC_PIDLISTFDSで自プロセスのfdを列挙して行うが、未実行・未検証（StoreLifetimeProbe.openDescriptorCounts参照）。
 final class V1V2MigrationFailureScratchTests: XCTestCase {
     private enum InjectedFailure: Error { case expected }
     private static var failurePhaseWasInvoked = false
@@ -21,7 +21,8 @@ final class V1V2MigrationFailureScratchTests: XCTestCase {
         // フェーズ間のlifetime gate（container解放・fixture内ファイルへのfd残存・inode固定）は実装済みだが、
         // 一度も実行されておらず、SwiftDataがcontainer解放時にSQLite接続を閉じることを観測で確かめていない。
         // V1V2MigrationFailureLifetimeProbeTests でgate自体の動作を確認するまで、I/O前の無条件skipを維持する。
-        // fd走査も 0..<rlim_cur だけで、soft limit引き下げ後に残る高い番号のfdを見逃しうる（全fdの保証ではない）。
+        // fd走査はPROC_PIDLISTFDSによる列挙に置き換えたが、実機で一度も実行しておらず、
+        // 「報告件数がバッファ容量未満なら切り詰めなし」というカーネル側の挙動も公式文書では確認できていない。
         throw XCTSkip("SwiftData read-write ModelContainerのlifetime gateが未実行・未検証のため停止中")
     }
 
@@ -327,7 +328,8 @@ private enum SQLiteIntegrityCheck {
 }
 
 /// 上のscratchテストのフェーズ間gateに使う部品の動作確認。
-/// ファイルを作成・変更せず、テストバンドル実行ファイルの読み取り専用openとin-memory containerだけを使う。
+/// ファイルを作成・変更せず、テストバンドル実行ファイルの読み取り専用open（とその高fdへの複製）、
+/// 自プロセスのfd列挙、合成メモリ、in-memory containerだけを使う。既存fdは閉じず、RLIMIT_NOFILEも変更しない。
 /// scratch・通常ストア・system temporary directoryには触れないので、skipしない。
 final class V1V2MigrationFailureLifetimeProbeTests: XCTestCase {
     /// fd走査が、自分で開いた読み取り専用fdを数え、closeで元に戻ることを確認する
@@ -403,25 +405,246 @@ final class V1V2MigrationFailureLifetimeProbeTests: XCTestCase {
         XCTAssertThrowsError(try StoreLifetimeProbe.identity(ofRegularFileAt: bundleDirectory))
     }
 
-    /// 実fdには触れず、注入したfstat結果だけで走査の判定を確認する
-    func testDescriptorScanSkipsOnlyBadDescriptorErrors() throws {
-        let counts = try StoreLifetimeProbe.openDescriptorCounts(scanning: 4) { fd, info in
-            guard fd == 2 else { return EBADF }
-            info.st_dev = 7
-            info.st_ino = 42
-            return 0
+    /// 読み取り専用で開いた実行ファイルのfdを、既存のどのfdより大きい番号へ複製し、列挙で見えることを確認する。
+    /// 自分で開いた・複製したfdだけを閉じ、既存fdには触れない。RLIMIT_NOFILEは読むだけで変更しない。
+    /// limitを下げないので「rlim_cur以上に残ったfd」そのものは再現しない（番号範囲に依存しない列挙の対照に留まる）
+    func testDescriptorListFindsReadOnlyExecutableDuplicatedToHighDescriptor() throws {
+        let executable = try XCTUnwrap(Bundle(for: Self.self).executableURL, "テストバンドルの実行ファイル")
+        let before = try StoreLifetimeProbe.openDescriptorCounts()
+        let highestExisting = try XCTUnwrap(try StoreLifetimeProbe.listOpenDescriptors(using: StoreLifetimeProbe.systemDescriptorListQuery).last?.fd)
+
+        let fd = open(executable.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0, "読み取り専用で開ける")
+        guard fd >= 0 else { return }
+        var closed = false
+        defer { if !closed { _ = close(fd) } }
+        var info = stat()
+        let fstatResult = fstat(fd, &info)
+        XCTAssertEqual(fstatResult, 0)
+        let identity = StoreLifetimeProbe.FileIdentity(info)
+
+        // 既存の最大番号より十分上を狙う。F_DUPFDはsoft limit未満しか使えないので、届かなければ未検証としてskipする
+        var limit = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &limit) == 0 else { throw XCTSkip("RLIMIT_NOFILEを読めず高fdの対照は未検証") }
+        let target = Int(highestExisting) + 256
+        guard let target32 = Int32(exactly: target), rlim_t(target) < limit.rlim_cur else {
+            throw XCTSkip("soft limit \(limit.rlim_cur) が低く高fdの対照は未検証")
         }
-        var expected = stat()
-        expected.st_dev = 7
-        expected.st_ino = 42
-        XCTAssertEqual(counts, [StoreLifetimeProbe.FileIdentity(expected): 1], "EBADFのfdは数えず、成功したfdだけを数える")
+        // F_DUPFD_CLOEXECは target以上で空いている最小の番号に複製する（既存fdを上書き・closeしない）
+        let high = fcntl(fd, F_DUPFD_CLOEXEC, target32)
+        guard high >= 0 else { throw XCTSkip("高fdへの複製ができず未検証 errno=\(errno)") }
+        var highClosed = false
+        defer { if !highClosed { _ = close(high) } }
+        XCTAssertGreaterThanOrEqual(high, target32)
+        XCTAssertGreaterThan(high, highestExisting, "既存のどのfdよりも大きい番号")
+
+        let listed = try StoreLifetimeProbe.listOpenDescriptors(using: StoreLifetimeProbe.systemDescriptorListQuery)
+        XCTAssertEqual(listed.first { $0.fd == high }?.type, UInt32(PROX_FDTYPE_VNODE), "高い番号の複製fdがvnodeとして列挙される")
+        XCTAssertEqual(listed.first { $0.fd == fd }?.type, UInt32(PROX_FDTYPE_VNODE), "元のfdも列挙される")
+        let whileOpen = try StoreLifetimeProbe.openDescriptorCounts()
+        XCTAssertEqual(whileOpen[identity, default: 0], before[identity, default: 0] + 2, "元のfdと高fdの2本が増えて見える")
+        XCTAssertThrowsError(try StoreLifetimeProbe.requireNoOpenDescriptors(to: [identity], phase: "高fd保持中"),
+                             "高い番号のfdだけが残っていてもgateは停止する")
+
+        // 低い番号を先に閉じ、高fdだけが残った状態でも検出できることを確認する
+        XCTAssertEqual(close(fd), 0)
+        closed = true
+        let onlyHigh = try StoreLifetimeProbe.openDescriptorCounts()
+        XCTAssertEqual(onlyHigh[identity, default: 0], before[identity, default: 0] + 1, "高fd1本が残って見える")
+        XCTAssertThrowsError(try StoreLifetimeProbe.requireNoOpenDescriptors(to: [identity], phase: "高fdのみ保持中"))
+
+        XCTAssertEqual(close(high), 0)
+        highClosed = true
+        let afterClose = try StoreLifetimeProbe.openDescriptorCounts()
+        XCTAssertEqual(afterClose[identity, default: 0], before[identity, default: 0], "closeで元の本数に戻る")
     }
 
-    func testDescriptorScanStopsOnNonBadDescriptorError() {
+    // MARK: - 列挙の注入テスト（合成メモリのみ。実fd・カーネルには触れない）
+
+    private static func entry(_ fd: Int32, _ type: UInt32 = 1) -> proc_fdinfo {
+        proc_fdinfo(proc_fd: fd, proc_fdtype: type)
+    }
+
+    private static func bytes(_ count: Int) -> Int32 {
+        Int32(count * MemoryLayout<proc_fdinfo>.stride)
+    }
+
+    func testDescriptorListReturnsAllEntriesWhenBufferHasSpareRoom() throws {
+        let query = SyntheticDescriptorQuery(estimate: (Self.bytes(4), 0)) { _, _ in
+            ([Self.entry(0), Self.entry(1), Self.entry(2), Self.entry(70_000, 2)], Self.bytes(4), 0)
+        }
+        let listed = try StoreLifetimeProbe.listOpenDescriptors(using: query.call)
+        XCTAssertEqual(listed.map(\.fd), [0, 1, 2, 70_000], "番号の大きさに関係なく報告された全件を返す")
+        XCTAssertEqual(listed.last?.type, 2)
+        XCTAssertEqual(query.sizingCalls, 1, "最初にサイズ見積もりだけを1回行う")
+        XCTAssertEqual(query.capacities.count, 1)
+        XCTAssertGreaterThan(query.capacities[0], 4, "見積もりより余裕のある容量で取得する")
+    }
+
+    func testDescriptorListRetriesWithLargerBufferWhenPossiblyTruncated() throws {
+        // 1回目はバッファ容量ちょうどまで埋める（切り詰めの可能性）。2回目は1回目より1本多いが、広げた容量には余裕が残る
+        var firstCapacity = 0
+        let query = SyntheticDescriptorQuery(estimate: (Self.bytes(1), 0)) { attempt, capacity in
+            if attempt == 0 { firstCapacity = capacity }
+            let count = attempt == 0 ? capacity : firstCapacity + 1
+            return ((0..<Int32(count)).map { Self.entry($0) }, Self.bytes(count), 0)
+        }
+        let listed = try StoreLifetimeProbe.listOpenDescriptors(using: query.call)
+        XCTAssertEqual(query.capacities.count, 2, "埋まっていたら取り直す")
+        XCTAssertEqual(query.capacities[1], query.capacities[0] * 2, "容量を広げて取り直す")
+        XCTAssertEqual(listed.count, query.capacities[0] + 1)
+    }
+
+    func testDescriptorListStopsWhenEveryAttemptMayBeTruncated() {
+        let query = SyntheticDescriptorQuery(estimate: (Self.bytes(1), 0)) { _, capacity in
+            ((0..<Int32(capacity)).map { Self.entry($0) }, Self.bytes(capacity), 0)
+        }
+        XCTAssertThrowsError(try StoreLifetimeProbe.listOpenDescriptors(using: query.call)) { error in
+            guard case FailureTestError.descriptorListTruncated = error else {
+                return XCTFail("切り詰めの可能性として停止する: \(error)")
+            }
+        }
+        XCTAssertEqual(query.capacities.count, StoreLifetimeProbe.descriptorListAttempts, "取り直しは上限回数まで")
+    }
+
+    func testDescriptorListStopsWhenRequiredBufferExceedsBound() {
+        let tooMany = StoreLifetimeProbe.descriptorListMaxEntries
+        let query = SyntheticDescriptorQuery(estimate: (Self.bytes(tooMany), 0)) { _, _ in ([], 0, 0) }
+        XCTAssertThrowsError(try StoreLifetimeProbe.listOpenDescriptors(using: query.call)) { error in
+            guard case FailureTestError.descriptorListTooLarge = error else {
+                return XCTFail("上限超過として停止する: \(error)")
+            }
+        }
+        XCTAssertTrue(query.capacities.isEmpty, "上限を超えるバッファは確保しない")
+    }
+
+    func testDescriptorListStopsOnQueryFailure() {
+        // 見積もり段階の失敗（0は「fdなし」と区別できないので失敗扱い）
+        for estimate in [(Int32(0), EPERM), (Int32(0), Int32(0)), (Int32(-1), ESRCH)] {
+            let query = SyntheticDescriptorQuery(estimate: estimate) { _, _ in ([Self.entry(0)], Self.bytes(1), 0) }
+            XCTAssertThrowsError(try StoreLifetimeProbe.listOpenDescriptors(using: query.call), "見積もり\(estimate)で停止") { error in
+                guard case FailureTestError.descriptorListFailed(let errorNumber) = error else {
+                    return XCTFail("取得失敗として停止する: \(error)")
+                }
+                XCTAssertEqual(errorNumber, estimate.1)
+            }
+            XCTAssertTrue(query.capacities.isEmpty)
+        }
+        // 取得段階の失敗
+        let failing = SyntheticDescriptorQuery(estimate: (Self.bytes(2), 0)) { _, _ in ([], 0, EPERM) }
+        XCTAssertThrowsError(try StoreLifetimeProbe.listOpenDescriptors(using: failing.call)) { error in
+            guard case FailureTestError.descriptorListFailed(EPERM) = error else {
+                return XCTFail("取得失敗として停止する: \(error)")
+            }
+        }
+    }
+
+    func testDescriptorListStopsOnMalformedResult() {
+        let stride = Int32(MemoryLayout<proc_fdinfo>.stride)
+        // 見積もりがエントリサイズの倍数でない
+        let oddEstimate = SyntheticDescriptorQuery(estimate: (stride + 1, 0)) { _, _ in ([Self.entry(0)], Self.bytes(1), 0) }
+        XCTAssertThrowsError(try StoreLifetimeProbe.listOpenDescriptors(using: oddEstimate.call))
+
+        let malformed: [(String, [proc_fdinfo], (Int) -> Int32)] = [
+            ("倍数でない戻り値", [Self.entry(0), Self.entry(1)], { _ in stride + 1 }),
+            ("容量を超える戻り値", [Self.entry(0)], { capacity in Self.bytes(capacity + 1) }),
+            ("負のfd", [Self.entry(-1), Self.entry(1)], { _ in Self.bytes(2) }),
+            ("重複したfd", [Self.entry(3), Self.entry(3)], { _ in Self.bytes(2) }),
+            ("昇順でないfd", [Self.entry(5), Self.entry(4)], { _ in Self.bytes(2) }),
+        ]
+        for (label, entries, reported) in malformed {
+            let query = SyntheticDescriptorQuery(estimate: (Self.bytes(2), 0)) { _, capacity in (entries, reported(capacity), 0) }
+            XCTAssertThrowsError(try StoreLifetimeProbe.listOpenDescriptors(using: query.call), label) { error in
+                guard case FailureTestError.descriptorListMalformed = error else {
+                    return XCTFail("\(label): 形状不正として停止する: \(error)")
+                }
+            }
+        }
+    }
+
+    // MARK: - 列挙→fstat→再列挙の注入テスト（実fdには触れない）
+
+    private static func syntheticStat(device: dev_t, inode: ino_t) -> stat {
+        var info = stat()
+        info.st_dev = device
+        info.st_ino = inode
+        return info
+    }
+
+    func testDescriptorSnapshotCountsEveryListedDescriptorWhenStable() throws {
+        let listed = [StoreLifetimeProbe.ListedDescriptor(fd: 0, type: 1), StoreLifetimeProbe.ListedDescriptor(fd: 90_000, type: 1)]
+        var listingCalls = 0
+        var statted: [Int32] = []
+        let counts = try StoreLifetimeProbe.openDescriptorCounts(listing: { listingCalls += 1; return listed }) { fd, info in
+            statted.append(fd)
+            info = Self.syntheticStat(device: 7, inode: 42)
+            return 0
+        }
+        XCTAssertEqual(statted, [0, 90_000], "列挙されたfdだけをfstatする（番号範囲を走査しない）")
+        XCTAssertEqual(listingCalls, 2, "fstat後に再列挙して一致を確認する")
+        XCTAssertEqual(counts, [StoreLifetimeProbe.FileIdentity(Self.syntheticStat(device: 7, inode: 42)): 2])
+    }
+
+    func testDescriptorSnapshotRetriesWhenListedDescriptorClosedDuringScan() throws {
+        let listed = [StoreLifetimeProbe.ListedDescriptor(fd: 3, type: 1)]
+        var statCalls = 0
+        let counts = try StoreLifetimeProbe.openDescriptorCounts(listing: { listed }) { _, info in
+            statCalls += 1
+            // 1回目は列挙後に閉じられた状況を真似る
+            guard statCalls > 1 else { return EBADF }
+            info = Self.syntheticStat(device: 1, inode: 2)
+            return 0
+        }
+        XCTAssertEqual(statCalls, 2, "EBADFを読み飛ばさず、スナップショットを取り直す")
+        XCTAssertEqual(counts, [StoreLifetimeProbe.FileIdentity(Self.syntheticStat(device: 1, inode: 2)): 1])
+    }
+
+    func testDescriptorSnapshotStopsWhenListedDescriptorKeepsDisappearing() {
+        var listingCalls = 0
+        XCTAssertThrowsError(try StoreLifetimeProbe.openDescriptorCounts(listing: {
+            listingCalls += 1
+            return [StoreLifetimeProbe.ListedDescriptor(fd: 3, type: 1)]
+        }) { _, _ in EBADF }) { error in
+            guard case FailureTestError.descriptorSnapshotUnstable = error else {
+                return XCTFail("不安定として停止する: \(error)")
+            }
+        }
+        XCTAssertEqual(listingCalls, StoreLifetimeProbe.descriptorSnapshotAttempts, "取り直しは上限回数まで")
+    }
+
+    func testDescriptorSnapshotStopsWhenListKeepsChanging() {
+        var listingCalls = 0
+        XCTAssertThrowsError(try StoreLifetimeProbe.openDescriptorCounts(listing: {
+            listingCalls += 1
+            // 呼ぶたびにfdが1本ずつ増える（走査中にfdが開かれ続ける状況）
+            return (0..<Int32(listingCalls)).map { StoreLifetimeProbe.ListedDescriptor(fd: $0, type: 1) }
+        }) { _, info in
+            info = Self.syntheticStat(device: 1, inode: 1)
+            return 0
+        }) { error in
+            guard case FailureTestError.descriptorSnapshotUnstable = error else {
+                return XCTFail("不安定として停止する: \(error)")
+            }
+        }
+        XCTAssertEqual(listingCalls, StoreLifetimeProbe.descriptorSnapshotAttempts * 2)
+    }
+
+    func testDescriptorSnapshotStopsOnListingError() {
+        XCTAssertThrowsError(try StoreLifetimeProbe.openDescriptorCounts(listing: {
+            throw FailureTestError.descriptorListTruncated
+        }) { _, _ in 0 }) { error in
+            guard case FailureTestError.descriptorListTruncated = error else {
+                return XCTFail("列挙の失敗をそのまま伝える: \(error)")
+            }
+        }
+    }
+
+    func testDescriptorSnapshotStopsOnNonBadDescriptorError() {
         // EBADF以外は「閉じている」と断定できないので、全て停止すること
+        let listed = [StoreLifetimeProbe.ListedDescriptor(fd: 0, type: 1), StoreLifetimeProbe.ListedDescriptor(fd: 1, type: 1)]
         for injected in [EIO, EINTR, EOVERFLOW, EACCES, Int32(-1)] {
-            XCTAssertThrowsError(try StoreLifetimeProbe.openDescriptorCounts(scanning: 4) { fd, _ in
-                fd == 1 ? injected : EBADF
+            XCTAssertThrowsError(try StoreLifetimeProbe.openDescriptorCounts(listing: { listed }) { fd, _ in
+                fd == 1 ? injected : 0
             }, "errno \(injected) で停止する") { error in
                 guard case FailureTestError.descriptorStatFailed(let fd, let errorNumber) = error else {
                     return XCTFail("fstat失敗として停止する: \(error)")
@@ -504,6 +727,39 @@ final class V1V2MigrationFailureLifetimeProbeTests: XCTestCase {
     }
 }
 
+/// proc_pidinfo(PROC_PIDLISTFDS)の応答を合成メモリだけで真似る注入用の関数。実fd・カーネル・ファイルには触れない
+private final class SyntheticDescriptorQuery {
+    /// 1回の取得への応答。(何回目か, バッファ容量のエントリ数) を受け取り、書き込むエントリと報告するバイト数を返す
+    typealias Response = (_ attempt: Int, _ capacity: Int) -> (entries: [proc_fdinfo], bytes: Int32, errno: Int32)
+
+    private let estimate: (bytes: Int32, errno: Int32)
+    private let respond: Response
+    private(set) var sizingCalls = 0
+    /// bufferありで呼ばれた時の容量（エントリ数）。取り直しの回数と広げ方を確認するのに使う
+    private(set) var capacities: [Int] = []
+
+    init(estimate: (bytes: Int32, errno: Int32), respond: @escaping Response) {
+        self.estimate = estimate
+        self.respond = respond
+    }
+
+    func call(_ buffer: UnsafeMutableRawPointer?, _ size: Int32) -> (bytes: Int32, errno: Int32) {
+        guard let buffer else {
+            sizingCalls += 1
+            return estimate
+        }
+        let capacity = Int(size) / MemoryLayout<proc_fdinfo>.stride
+        let response = respond(capacities.count, capacity)
+        capacities.append(capacity)
+        // 呼び出し元は[proc_fdinfo]のメモリを渡すので、その型として書き込む。容量を超えては書かない
+        let typed = buffer.assumingMemoryBound(to: proc_fdinfo.self)
+        for (index, entry) in response.entries.prefix(capacity).enumerated() {
+            typed[index] = entry
+        }
+        return (response.bytes, response.errno)
+    }
+}
+
 /// フェーズ間の安全確認。全て読み取りだけで、ファイルを作成・変更・削除しない。
 /// 同一UIDの悪意ある並行置換（TOCTOU）は防がない。誤操作や取り違えの検出が目的。
 private enum StoreLifetimeProbe {
@@ -583,19 +839,26 @@ private enum StoreLifetimeProbe {
         return FileIdentity(info)
     }
 
-    /// fd番号 0..<RLIMIT_NOFILEのsoft limit(rlim_cur) を走査し、inodeごとの本数を返す。
-    /// fstatは状態を変えない。走査範囲が決められない場合やEBADF以外のfstat失敗は判定不能として停止する（fail closed）。
-    /// 注意: これは「全fd」の走査ではない。soft limitを引き下げても既に開いている高い番号のfdは閉じられないため、
-    /// プロセス内でlimitが下げられていると rlim_cur 以上のfdを見逃す。fd残存なしの保証としては不十分で、
-    /// 実際に開いているfdを列挙する方法（例: libprocのPROC_PIDLISTFDS）に置き換えるまで本体の無条件skipを外さない。
+    /// PROC_PIDLISTFDSが返す1エントリ（fd番号と種類）。2回の列挙結果を比べられるようEquatableにする
+    struct ListedDescriptor: Equatable {
+        let fd: Int32
+        let type: UInt32
+    }
+
+    /// 列挙バッファの上限（エントリ数）。これを超える数のfdは想定外として停止する（512KiB相当）
+    static let descriptorListMaxEntries = 1 << 16
+    /// 切り詰めの可能性があるときにバッファを広げて取り直す回数の上限
+    static let descriptorListAttempts = 4
+    /// 列挙→fstat→再列挙の結果が一致するまで取り直す回数の上限
+    static let descriptorSnapshotAttempts = 4
+
+    /// 自プロセスが実際に開いているfdを列挙し、inodeごとの本数を返す。
+    /// fd番号の範囲（rlim_cur等）は使わないので、soft limitより上に残っている高い番号のfdも列挙対象になる。
+    /// 列挙・fstatの失敗、切り詰めの可能性、不正な形状、走査中のfd変動が解消しない場合は全て停止する（fail closed）。
+    /// 注意: 「戻り値がバッファ容量未満なら全件」というPROC_PIDLISTFDSの挙動はxnuの実装に基づく前提で、公式文書では確認していない。
     static func openDescriptorCounts() throws -> [FileIdentity: Int] {
-        var limit = rlimit()
-        guard getrlimit(RLIMIT_NOFILE, &limit) == 0,
-              limit.rlim_cur > 0,
-              limit.rlim_cur <= rlim_t(1 << 20) else {
-            throw FailureTestError.descriptorScanUnavailable
-        }
-        return try openDescriptorCounts(scanning: Int32(limit.rlim_cur), using: systemDescriptorStat)
+        try openDescriptorCounts(listing: { try listOpenDescriptors(using: systemDescriptorListQuery) },
+                                 using: systemDescriptorStat)
     }
 
     /// fstatの結果を「成功なら0、失敗ならerrno」で返す関数の型。テストで失敗を注入できるよう差し替え可能にする
@@ -608,22 +871,103 @@ private enum StoreLifetimeProbe {
         return error == 0 ? -1 : error
     }
 
-    /// 0..<limit のfdを走査する。EBADF（そのfd番号は未使用）だけを読み飛ばし、
-    /// それ以外の失敗はfdが開いているか判定できないので停止する（fail closed）
-    static func openDescriptorCounts(scanning limit: Int32, using statDescriptor: DescriptorStat) throws -> [FileIdentity: Int] {
-        var counts: [FileIdentity: Int] = [:]
-        for fd in 0..<limit {
-            var info = stat()
-            let result = statDescriptor(fd, &info)
-            if result == 0 {
-                counts[FileIdentity(info), default: 0] += 1
-                continue
-            }
-            guard result == EBADF else {
-                throw FailureTestError.descriptorStatFailed(fd: fd, errno: result)
-            }
+    /// proc_pidinfo(自pid, PROC_PIDLISTFDS, 0, buffer, size) と同じ形の関数型。(戻り値, 直後のerrno) を返す。
+    /// テストでは合成メモリに書き込む関数を渡し、実プロセスのfdやカーネルに触れずに判定を確かめる
+    typealias DescriptorListQuery = (UnsafeMutableRawPointer?, Int32) -> (bytes: Int32, errno: Int32)
+
+    /// 自プロセスだけを対象にする（他プロセスのpidは渡さない）。fdを開閉せず、情報を読むだけ
+    static func systemDescriptorListQuery(_ buffer: UnsafeMutableRawPointer?, _ size: Int32) -> (bytes: Int32, errno: Int32) {
+        // 失敗時のproc_pidinfoは0を返してerrnoを設定するので、前の値が残らないよう先に0にしておく
+        errno = 0
+        let result = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, buffer, size)
+        return (result, errno)
+    }
+
+    /// 1回分の列挙結果を検証する。全件取れたと確認できればエントリを返し、
+    /// バッファが埋まって切り詰めの可能性があるときはnil（呼び出し側が広げて取り直す）。それ以外の異常はthrowする
+    static func decodeDescriptorList(returnedBytes: Int32, errno errorNumber: Int32, buffer: [proc_fdinfo]) throws -> [ListedDescriptor]? {
+        let stride = MemoryLayout<proc_fdinfo>.stride
+        // 0は「失敗」と「fdが1本もない」を区別できない。テスト実行中のプロセスがfd 0本はありえないので失敗扱い
+        guard returnedBytes > 0 else {
+            throw FailureTestError.descriptorListFailed(errno: errorNumber)
         }
-        return counts
+        guard Int(returnedBytes) % stride == 0 else {
+            throw FailureTestError.descriptorListMalformed("戻り値\(returnedBytes)がエントリサイズの倍数でない")
+        }
+        let count = Int(returnedBytes) / stride
+        guard count <= buffer.count else {
+            throw FailureTestError.descriptorListMalformed("戻り値\(count)件がバッファ容量\(buffer.count)件を超える")
+        }
+        // 容量ちょうどまで埋まっていたら、入りきらなかったfdがある可能性を否定できない
+        guard count < buffer.count else { return nil }
+        var entries: [ListedDescriptor] = []
+        entries.reserveCapacity(count)
+        for raw in buffer.prefix(count) {
+            // xnuはfd番号の昇順で返す。負の番号・重複・順序の乱れは形状不正として停止する
+            guard raw.proc_fd >= 0, raw.proc_fd > (entries.last?.fd ?? -1) else {
+                throw FailureTestError.descriptorListMalformed("fd番号が負・重複・昇順でない: \(raw.proc_fd)")
+            }
+            entries.append(ListedDescriptor(fd: raw.proc_fd, type: raw.proc_fdtype))
+        }
+        return entries
+    }
+
+    /// サイズ見積もり→取得を行い、切り詰めの可能性があれば上限付きでバッファを広げて取り直す
+    static func listOpenDescriptors(using query: DescriptorListQuery) throws -> [ListedDescriptor] {
+        let stride = MemoryLayout<proc_fdinfo>.stride
+        // bufferにnilを渡すと必要バイト数の見積もりだけが返る
+        let estimate = query(nil, 0)
+        guard estimate.bytes > 0 else {
+            throw FailureTestError.descriptorListFailed(errno: estimate.errno)
+        }
+        guard Int(estimate.bytes) % stride == 0 else {
+            throw FailureTestError.descriptorListMalformed("見積もり\(estimate.bytes)がエントリサイズの倍数でない")
+        }
+        // 見積もり後にfdが増えても1回で収まりやすいよう余裕を足す
+        var capacity = Int(estimate.bytes) / stride + 32
+        for _ in 0..<descriptorListAttempts {
+            guard capacity <= descriptorListMaxEntries else {
+                throw FailureTestError.descriptorListTooLarge(capacity)
+            }
+            // ゼロ初期化した配列をそのまま書き込み先にする。サイズはエントリ数×strideで、Int32に必ず収まる
+            var buffer = [proc_fdinfo](repeating: proc_fdinfo(), count: capacity)
+            let result = buffer.withUnsafeMutableBytes { raw in
+                query(raw.baseAddress, Int32(raw.count))
+            }
+            if let entries = try decodeDescriptorList(returnedBytes: result.bytes, errno: result.errno, buffer: buffer) {
+                return entries
+            }
+            // 倍にした値を上限で頭打ちにし、上限でも埋まったら次のループ先頭のguardで停止させる
+            capacity = capacity >= descriptorListMaxEntries ? descriptorListMaxEntries + 1 : min(capacity * 2, descriptorListMaxEntries)
+        }
+        throw FailureTestError.descriptorListTruncated
+    }
+
+    /// 列挙したfdを全てfstatし、もう一度列挙して同じ結果であることを確かめてからinodeごとの本数を返す。
+    /// - 列挙後に閉じられたfd（fstatがEBADF）は数えずに読み飛ばさず、スナップショットごと取り直す
+    /// - 再列挙の結果が違えば（走査中に開閉があれば）取り直す
+    /// - 上限回数で一致しなければ停止する。EBADF以外のfstat失敗は即停止する
+    static func openDescriptorCounts(listing: () throws -> [ListedDescriptor], using statDescriptor: DescriptorStat) throws -> [FileIdentity: Int] {
+        attempts: for _ in 0..<descriptorSnapshotAttempts {
+            let listed = try listing()
+            var counts: [FileIdentity: Int] = [:]
+            for entry in listed {
+                var info = stat()
+                let result = statDescriptor(entry.fd, &info)
+                if result == 0 {
+                    counts[FileIdentity(info), default: 0] += 1
+                    continue
+                }
+                guard result == EBADF else {
+                    throw FailureTestError.descriptorStatFailed(fd: entry.fd, errno: result)
+                }
+                // 列挙からfstatまでの間に閉じられた。このスナップショットは信用せず最初から取り直す
+                continue attempts
+            }
+            guard try listing() == listed else { continue attempts }
+            return counts
+        }
+        throw FailureTestError.descriptorSnapshotUnstable
     }
 
     /// 指定したinodeを開いているfdが1本でもあれば停止する
@@ -638,7 +982,7 @@ private enum StoreLifetimeProbe {
     /// - directoryが作成時と同じinodeで、所有者・権限が変わっていない
     /// - 中身が許可した名前だけで、全て通常ファイル・hardlink 1本
     /// - 作成済みのstore/backup/restoreが作成時と同じinodeのまま
-    /// - fixture内のどのファイルも、fd番号 0..<rlim_cur の範囲では開かれていない（rlim_cur以上は未確認）
+    /// - fixture内のどのファイルも、PROC_PIDLISTFDSで列挙した自プロセスのfdから開かれていない
     static func requirePhaseClosed(_ phase: String, directory: URL, directoryIdentity: FileIdentity, pinned: [String: FileIdentity]) throws {
         var directoryInfo = stat()
         guard lstat(directory.path, &directoryInfo) == 0,
@@ -668,7 +1012,11 @@ private enum StoreLifetimeProbe {
 private enum FailureTestError: Error {
     case unsafeFixture, invalidBackupPath, sqlite
     case unexpectedMigrationResult
-    case descriptorScanUnavailable
+    case descriptorListFailed(errno: Int32)
+    case descriptorListMalformed(String)
+    case descriptorListTruncated
+    case descriptorListTooLarge(Int)
+    case descriptorSnapshotUnstable
     case descriptorStatFailed(fd: Int32, errno: Int32)
     case integrityCheckFailed(String)
     case containerStillAlive(String)
