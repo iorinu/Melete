@@ -29,8 +29,9 @@ struct MeleteApp: App {
             var selectedMode: MainView.StoreMode = .v1
             guard route != .error else { throw StartupError.invalidUITestStore }
 #if DEBUG && MELETE_SCRATCH_ISOLATION
-            // 失敗し得る証拠の検証は、プロパティとModelContainerを確定する前に行う
-            if route == .isolatedV2 {
+            // 失敗し得る証拠の検証は、プロパティとModelContainerを確定する前に行う。
+            // scratch検証ビルドはV1/V2どちらの隔離起動でもmarker+PIDの証拠を必須にする
+            if route == .isolatedV1 || route == .isolatedV2 {
                 guard let evidence = Self.scratchEvidence(arguments: arguments) else {
                     throw StartupError.invalidUITestStore
                 }
@@ -57,7 +58,16 @@ struct MeleteApp: App {
                 } else {
                     let schema = Schema(versionedSchema: MeleteSchemaV1.self)
                     configuration = ModelConfiguration("MeleteUITest", schema: schema, url: isolatedStoreURL, cloudKitDatabase: .none)
-                    resolvedContainer = try ModelContainer(for: schema, configurations: [configuration])
+                    do {
+                        resolvedContainer = try ModelContainer(for: schema, configurations: [configuration])
+                    } catch {
+#if MELETE_SCRATCH_ISOLATION
+                        // V2と同じく、パス等を含み得る詳細エラーはscratch専用画面に出さない
+                        throw StartupError.scratchStoreOpenFailed
+#else
+                        throw error
+#endif
+                    }
                 }
                 usingIsolatedStore = true
             } else if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil || NSClassFromString("XCTestCase") != nil {
@@ -96,12 +106,7 @@ struct MeleteApp: App {
 #if DEBUG
     private static func isolatedStoreURLFromLaunchArguments(arguments: [String]) -> URL? {
 #if MELETE_SCRATCH_ISOLATION
-        let flags = ["--melete-ui-test-root", "--melete-ui-test-store", "--melete-v2-experimental"]
-        let values = Array(arguments.dropFirst())
-        guard values.filter({ $0 == "--melete-ui-test-root" }).count == 1,
-              values.filter({ $0 == "--melete-ui-test-store" }).count == 1,
-              values.filter({ $0 == "--melete-v2-experimental" }).count == 1,
-              !values.contains(where: { $0.hasPrefix("--melete-") && !flags.contains($0) }) else { return nil }
+        guard ScratchLaunchArgumentShape.isAccepted(arguments: arguments) else { return nil }
 #endif
         guard arguments.contains("--melete-ui-test-root") || arguments.contains("--melete-ui-test-store") || arguments.contains("--melete-v2-experimental") else { return nil }
         return UITestStoreIsolation.storeURL(arguments: arguments)
@@ -205,6 +210,25 @@ private struct WindowTransparencyConfigurator: NSViewRepresentable {
         window.backgroundColor = .clear
     }
 }
+
+#if DEBUG && MELETE_SCRATCH_ISOLATION
+/// scratch検証ビルドの起動引数の「形」だけを確認する。ファイルやストアには一切触れない純粋関数。
+/// 単体テストで挙動を固定できるよう、privateにしていない。
+/// root/storeは各1回必須、V2フラグは0回（V1）か1回（V2）だけ許可する。
+/// フラグ直後の値が欠けている場合の拒否はStartupRouteSelection側の責務。
+enum ScratchLaunchArgumentShape {
+    static func isAccepted(arguments: [String]) -> Bool {
+        let flags = ["--melete-ui-test-root", "--melete-ui-test-store", "--melete-v2-experimental"]
+        // argv[0]は実行ファイルのパスなので形チェックの対象外にする
+        let values = Array(arguments.dropFirst())
+        guard values.filter({ $0 == "--melete-ui-test-root" }).count == 1,
+              values.filter({ $0 == "--melete-ui-test-store" }).count == 1,
+              values.filter({ $0 == "--melete-v2-experimental" }).count <= 1,
+              !values.contains(where: { $0.hasPrefix("--melete-") && !flags.contains($0) }) else { return false }
+        return true
+    }
+}
+#endif
 
 #if DEBUG
 enum UITestStoreIsolation {

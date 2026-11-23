@@ -39,6 +39,7 @@
 		CC89A076DF734B3E220154E7 /* WorkoutSetAdditionV1ScratchStaleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83F16CC501E442AA3860B1BF /* WorkoutSetAdditionV1ScratchStaleTests.swift */; };
 		DC33B7EFF60C51528CEBF876 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */; };
 		DC4F51B939B8ABA7BA7DBAE4 /* WorkoutCreationV2BaselineSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82E64515C0C28160225902DD /* WorkoutCreationV2BaselineSafetyTests.swift */; };
+		DE70BFA5C4C089846560F19F /* ScratchLaunchArgumentV1Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C005BB2C161F00A480485E /* ScratchLaunchArgumentV1Tests.swift */; };
 		E4DE6836732A790E4B3275DA /* WorkoutValueEditingV2ScratchSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54122B29FF2530C13BFB9F84 /* WorkoutValueEditingV2ScratchSafetyTests.swift */; };
 		EA8C26ECB01B60DC4448073D /* ExerciseArchiveToggleSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AF01A7C57273F88BC55E22B /* ExerciseArchiveToggleSafetyTests.swift */; };
 		F264591D4B22E2B60CBF4C7A /* V1V2MigrationFailureScratchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBD761191A98FDF684D8BBB7 /* V1V2MigrationFailureScratchTests.swift */; };
@@ -102,6 +103,7 @@
 		D17F434C47A55AD67B54B62D /* MetricDefinitionEditingSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDefinitionEditingSessionTests.swift; sourceTree = "<group>"; };
 		D3200BD67C58695CF4EDA18E /* WorkoutCreationV2ScratchReopenTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutCreationV2ScratchReopenTests.swift; sourceTree = "<group>"; };
 		DBD761191A98FDF684D8BBB7 /* V1V2MigrationFailureScratchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V1V2MigrationFailureScratchTests.swift; sourceTree = "<group>"; };
+		E5C005BB2C161F00A480485E /* ScratchLaunchArgumentV1Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScratchLaunchArgumentV1Tests.swift; sourceTree = "<group>"; };
 		F674BE6419749A0E6C424EDA /* SQLiteMemoryBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteMemoryBackup.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -119,6 +121,7 @@
 				C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */,
 				5744EF0E54881543913A57EE /* MetricDefinitionEditingV2SafetyTests.swift */,
 				CA33783CC164E616DF7AA67C /* ScratchEvidencePolicyTests.swift */,
+				E5C005BB2C161F00A480485E /* ScratchLaunchArgumentV1Tests.swift */,
 				C871CAE169789FECB4314785 /* ScratchStoreIsolationSafetyTests.swift */,
 				F674BE6419749A0E6C424EDA /* SQLiteMemoryBackup.swift */,
 				6C93E033143F0FE406E7B55F /* SQLiteMemoryBackupTests.swift */,
@@ -311,6 +314,7 @@
 				9F34F846E819F6A9EC293793 /* SQLiteMemoryBackupTests.swift in Sources */,
 				76AD19C1F70C0F7C0009A7BB /* ScratchEvidencePolicy.swift in Sources */,
 				3C6FBC99C783EA47F35887F9 /* ScratchEvidencePolicyTests.swift in Sources */,
+				DE70BFA5C4C089846560F19F /* ScratchLaunchArgumentV1Tests.swift in Sources */,
 				B5C4E8ABC43C57B80ED4D52A /* ScratchStoreIsolationSafetyTests.swift in Sources */,
 				96B9A241D0F3EEB232A1AA72 /* StartupRouteSelectionSafetyTests.swift in Sources */,
 				2F17F3DA27F5CCCAF1DB79BD /* SwiftDataV1BackupSafetyTests.swift in Sources */,
