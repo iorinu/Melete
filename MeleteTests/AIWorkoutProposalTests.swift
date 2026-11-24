@@ -758,6 +758,127 @@ final class AIWorkoutProposalTests: XCTestCase {
         XCTAssertEqual(try workoutCount(fixture), 1)
     }
 
+    // MARK: - 実施日のカレンダー
+
+    // 日付の比較に使うタイムゾーン。実行環境に依存させず、地域のタイムゾーンとして固定する
+    private var tokyo: TimeZone { TimeZone(identifier: "Asia/Tokyo")! }
+
+    // 既存の画面（MainView）と同じ組み立てのグレゴリオ暦。候補の "yyyy-MM-dd" が本来指す日を求める基準にする
+    private var mainViewCalendar: Calendar { WorkoutCalendarLogic.calendar(timeZone: tokyo) }
+
+    // 確認画面(AIWorkoutProposalReviewForm.dayText)と同じ書式で、指定したカレンダーで日付を表示する。
+    // ロケールだけは実行環境に依存させないよう固定する
+    private func displayedDay(_ date: Date, calendar: Calendar) -> String {
+        var style = Date.FormatStyle(date: .long, time: .omitted)
+        style.calendar = calendar
+        style.timeZone = calendar.timeZone
+        style.locale = Locale(identifier: "ja_JP")
+        return date.formatted(style)
+    }
+
+    // 入力のカレンダーを渡して候補「2026-01-15」を既存のcoordinator経路で確認・承認し、
+    // review・保存済みWorkout・既存画面のグレゴリオ暦のいずれから見ても 2026-01-15 であることを確かめる
+    private func assertProposalDayIsGregorian(inputCalendar: Calendar, file: StaticString = #filePath, line: UInt = #line) throws {
+        let fixture = try makeFixture()
+        let gregorian = mainViewCalendar
+        // 候補の日付が本来指す日（グレゴリオ暦・Asia/Tokyo の 2026-01-15 0:00）
+        let expectedDay = try XCTUnwrap(gregorian.date(from: DateComponents(year: 2026, month: 1, day: 15)), file: file, line: line)
+        // 未来日判定は2026-01-15より後の固定日時で行う
+        let now = try XCTUnwrap(gregorian.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 12)), file: file, line: line)
+
+        let request = try CoordinatedRequest(in: fixture.context)
+        let review = try request.review(standardProposal(fixture), in: fixture.context, calendar: inputCalendar, now: now)
+
+        // review: 文字列表現だけでなく、保持している日時そのものがグレゴリオ暦の 2026-01-15 であること
+        XCTAssertEqual(review.dayString, pastDay, file: file, line: line)
+        XCTAssertEqual(gregorian.startOfDay(for: review.day), expectedDay, "reviewの日時が別の日を指している", file: file, line: line)
+        XCTAssertEqual(WorkoutCalendarLogic.dayKey(review.day, calendar: gregorian), pastDay, file: file, line: line)
+        // 確認画面の表示が、グレゴリオ暦で表示した 2026-01-15 と同じになること
+        XCTAssertEqual(displayedDay(review.day, calendar: review.calendar), displayedDay(expectedDay, calendar: gregorian), file: file, line: line)
+
+        let workout = try request.approve(in: fixture.context)
+
+        // 新しいcontextから読み直した保存済みの値で確かめる
+        let workoutID = workout.id
+        let saved = try XCTUnwrap(ModelContext(fixture.container).fetch(FetchDescriptor<Workout>(predicate: #Predicate { $0.id == workoutID })).first, file: file, line: line)
+        XCTAssertEqual(saved.day, pastDay, file: file, line: line)
+        XCTAssertEqual(saved.day, review.dayString, "確認画面で示した日と保存された日が一致しない", file: file, line: line)
+        // 既存画面と同じグレゴリオ暦で保存済みの日を読むと、reviewが保持している日と同じ日になること
+        let storedDay = try XCTUnwrap(WorkoutValueEditing.date(from: saved.day, calendar: gregorian), file: file, line: line)
+        XCTAssertEqual(storedDay, gregorian.startOfDay(for: review.day), file: file, line: line)
+        XCTAssertEqual(try workoutCount(fixture), 1, file: file, line: line)
+    }
+
+    // 入力のカレンダーが仏暦でも、候補「2026-01-15」は仏暦2026年（西暦1483年）ではなく
+    // グレゴリオ暦の2026-01-15として確認・保存されること
+    func testBuddhistInputCalendarStillReviewsAndSavesGregorianDay() throws {
+        var buddhist = Calendar(identifier: .buddhist)
+        buddhist.timeZone = tokyo
+        // 前提: 仏暦では同じ年の数字が別の年を指す（ここが崩れると、このテストは食い違いを検出できない）
+        let buddhistDate = try XCTUnwrap(buddhist.date(from: DateComponents(year: 2026, month: 1, day: 15)))
+        XCTAssertNotEqual(mainViewCalendar.component(.year, from: buddhistDate), 2026)
+
+        try assertProposalDayIsGregorian(inputCalendar: buddhist)
+    }
+
+    // 対照: 通常のグレゴリオ暦を渡した場合も同じ結果になること（既存の挙動を変えていないことの確認）
+    func testGregorianInputCalendarReviewsAndSavesSameDay() throws {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = tokyo
+        try assertProposalDayIsGregorian(inputCalendar: gregorian)
+    }
+
+    // 仏暦のcalendarを渡しても、未来日の判定はグレゴリオ暦で行うこと。
+    // 仏暦で解釈すると 2026-12-31 は西暦1483年の過去日になり、通ってしまう
+    func testBuddhistInputCalendarRejectsGregorianFutureDay() throws {
+        let fixture = try makeFixture()
+        var buddhist = Calendar(identifier: .buddhist)
+        buddhist.timeZone = tokyo
+        let now = try XCTUnwrap(mainViewCalendar.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 12)))
+
+        let request = try CoordinatedRequest(in: fixture.context)
+        let proposal = try AIWorkoutProposal.decode(from: proposalData(day: "2026-12-31", entries: [["exerciseID": fixture.exercise.id.uuidString, "sets": standardSets(fixture)]]))
+        XCTAssertThrowsError(try request.review(proposal, in: fixture.context, calendar: buddhist, now: now)) { error in
+            XCTAssertEqual(error as? AIWorkoutProposalError, .futureDay, "\(error)")
+        }
+        XCTAssertEqual(request.status, .awaitingResponse)
+        XCTAssertFalse(fixture.context.hasChanges)
+        XCTAssertEqual(try workoutCount(fixture), 0)
+    }
+
+    // 仏暦のcalendarを渡しても、そのタイムゾーンは日付の境界にそのまま使われること。
+    // 同じ時刻（UTCの 2026-01-15 15:30）が、Asia/Tokyo では 2026-01-16、UTC では 2026-01-15 になる
+    func testBuddhistInputCalendarKeepsItsTimeZoneForDayBoundary() throws {
+        var utcGregorian = Calendar(identifier: .gregorian)
+        utcGregorian.timeZone = TimeZone(identifier: "UTC")!
+        let now = try XCTUnwrap(utcGregorian.date(from: DateComponents(year: 2026, month: 1, day: 15, hour: 15, minute: 30)))
+        let nextDay = "2026-01-16"
+
+        // Asia/Tokyo の仏暦: 今日は 2026-01-16 なので受け付け、reviewもその日を指す
+        let tokyoFixture = try makeFixture()
+        var tokyoBuddhist = Calendar(identifier: .buddhist)
+        tokyoBuddhist.timeZone = tokyo
+        let tokyoRequest = try CoordinatedRequest(in: tokyoFixture.context)
+        let tokyoProposal = try AIWorkoutProposal.decode(from: proposalData(day: nextDay, entries: [["exerciseID": tokyoFixture.exercise.id.uuidString, "sets": standardSets(tokyoFixture)]]))
+        let review = try tokyoRequest.review(tokyoProposal, in: tokyoFixture.context, calendar: tokyoBuddhist, now: now)
+        XCTAssertEqual(review.dayString, nextDay)
+        XCTAssertEqual(review.calendar.identifier, .gregorian)
+        XCTAssertEqual(review.calendar.timeZone, tokyo)
+        XCTAssertEqual(WorkoutCalendarLogic.dayKey(review.day, calendar: mainViewCalendar), nextDay)
+
+        // UTC の仏暦: 今日はまだ 2026-01-15 なので未来日として拒否する
+        let utcFixture = try makeFixture()
+        var utcBuddhist = Calendar(identifier: .buddhist)
+        utcBuddhist.timeZone = TimeZone(identifier: "UTC")!
+        let utcRequest = try CoordinatedRequest(in: utcFixture.context)
+        let utcProposal = try AIWorkoutProposal.decode(from: proposalData(day: nextDay, entries: [["exerciseID": utcFixture.exercise.id.uuidString, "sets": standardSets(utcFixture)]]))
+        XCTAssertThrowsError(try utcRequest.review(utcProposal, in: utcFixture.context, calendar: utcBuddhist, now: now)) { error in
+            XCTAssertEqual(error as? AIWorkoutProposalError, .futureDay, "\(error)")
+        }
+        XCTAssertEqual(utcRequest.status, .awaitingResponse)
+        XCTAssertEqual(try workoutCount(utcFixture), 0)
+    }
+
     func testReentrantApproveDuringSaveIsRejected() throws {
         let fixture = try makeFixture()
         let (request, review) = try makeReview(fixture)

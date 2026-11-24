@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import SwiftData
 
 // AI会話から運動記録を作る第1段階の基礎部分。
@@ -316,7 +317,11 @@ private struct AIWorkoutDefinitionState: Equatable {
     // catalog はAIへ送ったものを渡す。送っていない種目や、送信後に定義が変わった種目は保存対象にしない。
     // fileprivate にして、このファイルの外（UI・@testable import したテストを含む）からは呼べないようにしている。
     // 外からreviewを得る経路を AIWorkoutProposalCoordinator.review(for:...) だけにし、同じ応答から別々のreviewを作らせないため
-    fileprivate static func makeReview(for proposal: AIWorkoutProposal, catalog: AIWorkoutCatalog, in context: ModelContext, calendar: Calendar = .current, now: Date = .now) throws -> AIWorkoutProposalReview {
+    fileprivate static func makeReview(for proposal: AIWorkoutProposal, catalog: AIWorkoutCatalog, in context: ModelContext, calendar inputCalendar: Calendar = .current, now: Date = .now) throws -> AIWorkoutProposalReview {
+        // 候補の "yyyy-MM-dd" は既存画面(MainView)と同じグレゴリオ暦の日付として扱う。
+        // 入力calendarからはタイムゾーンだけを引き継ぎ、暦の種類（仏暦など）は使わない。
+        // 日付の解釈・未来日判定・reviewの表示と保存をすべてこの1つの暦で行い、食い違いを防ぐ
+        let calendar = AIWorkoutProposalValidation.calendar(from: inputCalendar)
         guard !context.hasChanges else { throw AIWorkoutProposalError.unsavedContext }
         guard proposal.kind == AIWorkoutProposal.createWorkoutKind else { throw AIWorkoutProposalError.unsupportedKind }
         guard let day = date(from: proposal.day, calendar: calendar) else { throw AIWorkoutProposalError.invalidDay }
@@ -372,6 +377,11 @@ private struct AIWorkoutDefinitionState: Equatable {
         guard case .success = WorkoutSetDraftEditing.validatedEntries(drafts) else { throw AIWorkoutProposalError.invalidValue }
         // 検証に使ったcontextのcontainerをreviewに結び付け、承認はそのcontainerのcontextでだけ受け付ける
         return AIWorkoutProposalReview(day: day, entries: drafts, calendar: calendar, container: context.container)
+    }
+
+    // 入力calendarのタイムゾーンを保ったまま、既存画面と同じ組み立てのグレゴリオ暦を返す
+    static func calendar(from inputCalendar: Calendar) -> Calendar {
+        WorkoutCalendarLogic.calendar(timeZone: inputCalendar.timeZone)
     }
 
     // "yyyy-MM-dd" だけを受け付ける。2026-02-30 のような存在しない日付は、往復変換が一致しないので拒否する
@@ -454,7 +464,9 @@ enum AIWorkoutProposalError: LocalizedError, Equatable {
 // 外へ公開しているのは、確認画面に必要な値の読み取り・修正(setValue)・検証メッセージ・キャンセルだけ。
 // 応答の再送・再生成に対する二重登録の防止は、同一アプリセッション内の同じcoordinatorインスタンスの範囲に限られる
 // （coordinatorを複数作った場合・アプリ再起動後の再送は防げない。coordinatorの説明を参照）
-@MainActor final class AIWorkoutProposalReview: Identifiable {
+// @Observable にして、確認画面がこのインスタンスの entries / state を直接表示する（画面側に値のコピーを持たせず、
+// 表示中の値と承認時に保存される値が食い違わないようにするため）。公開する読み書きの範囲は変わらない
+@Observable @MainActor final class AIWorkoutProposalReview: Identifiable {
     enum State: Equatable {
         case pending
         case saving
@@ -464,6 +476,7 @@ enum AIWorkoutProposalError: LocalizedError, Equatable {
 
     let id = UUID()
     let day: Date
+    // 検証で使ったのと同じグレゴリオ暦（入力calendarのタイムゾーン）。確認画面の表示と承認時の保存もこの暦で行う
     let calendar: Calendar
     private(set) var entries: [WorkoutEntryDraft]
     private(set) var state: State = .pending
@@ -672,6 +685,46 @@ enum AIWorkoutProposalReviewError: LocalizedError, Equatable {
         case .cancelled: throw AIWorkoutProposalCoordinatorError.cancelled
         case .awaitingResponse, .reviewing: return slot
         }
+    }
+}
+
+// MARK: - 確認画面へ渡す組
+
+extension AIWorkoutProposalCoordinator {
+    // 確認画面へ渡す「coordinator・リクエストID・review」の組。
+    // 初期化子は fileprivate で、reviewSession(for:...) からだけ作られる。1つのIDのreviewは作成後に差し替えられないので、
+    // 画面に表示しているreviewと、承認・キャンセルするリクエストIDが食い違うことはない。
+    // 承認・キャンセルは coordinator の approve / cancel をそのまま呼ぶだけで、別の保存経路は持たない
+    struct ReviewSession: Identifiable {
+        let id: UUID
+        let requestID: UUID
+        let review: AIWorkoutProposalReview
+        private let coordinator: AIWorkoutProposalCoordinator
+
+        fileprivate init(requestID: UUID, review: AIWorkoutProposalReview, reviewID: UUID, coordinator: AIWorkoutProposalCoordinator) {
+            id = reviewID
+            self.requestID = requestID
+            self.review = review
+            self.coordinator = coordinator
+        }
+
+        @MainActor var status: Status? {
+            coordinator.status(of: requestID)
+        }
+
+        @MainActor func approve(in context: ModelContext, persist: (ModelContext) throws -> Void = { try $0.save() }) throws -> Workout {
+            try coordinator.approve(requestID, in: context, persist: persist)
+        }
+
+        @MainActor func cancel() throws {
+            try coordinator.cancel(requestID)
+        }
+    }
+
+    // review(for:...) と同じ検証・同じreviewを返し、確認画面用の組にまとめる
+    func reviewSession(for requestID: UUID, proposal: AIWorkoutProposal, in context: ModelContext, calendar: Calendar = .current, now: Date = .now) throws -> ReviewSession {
+        let review = try review(for: requestID, proposal: proposal, in: context, calendar: calendar, now: now)
+        return ReviewSession(requestID: requestID, review: review, reviewID: review.id, coordinator: self)
     }
 }
 
