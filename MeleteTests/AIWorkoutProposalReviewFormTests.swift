@@ -19,6 +19,10 @@ final class AIWorkoutProposalReviewFormTests: XCTestCase {
 
     private struct PersistFailure: Error {}
 
+    private struct MarkedPersistFailure: LocalizedError {
+        var errorDescription: String? { "SYNTHETIC_SECRET_MARKER_7F3A91" }
+    }
+
     // 日付の解釈を実行環境のタイムゾーンに依存させない
     private var calendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
@@ -151,6 +155,20 @@ final class AIWorkoutProposalReviewFormTests: XCTestCase {
 
         guard case .saved = AIWorkoutProposalReviewFormAction.approve(fixture.session, in: fixture.context) else { return XCTFail() }
         XCTAssertEqual(try workoutCount(fixture.container), 1)
+    }
+
+    func testUnknownPersistErrorDoesNotExposeLocalizedDescription() throws {
+        let fixture = try makeFixture()
+
+        let outcome = AIWorkoutProposalReviewFormAction.approve(fixture.session, in: fixture.context) { _ in
+            throw MarkedPersistFailure()
+        }
+
+        guard case let .failed(message) = outcome else { return XCTFail("保存失敗として扱うこと") }
+        XCTAssertFalse(message.contains("SYNTHETIC_SECRET_MARKER_7F3A91"), message)
+        XCTAssertEqual(message, "保存処理中にエラーが発生しました。記録を確認してください。")
+        XCTAssertEqual(fixture.session.review.state, .pending)
+        XCTAssertEqual(try workoutCount(fixture.container), 0)
     }
 
     func testDefinitionChangedElsewhereIsRejectedAndEditsAreKept() throws {

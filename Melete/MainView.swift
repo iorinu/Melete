@@ -129,7 +129,7 @@ struct MainView: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 14)
                     .padding(.bottom, 8)
-                ForEach(["ホーム", "記録", "種目"], id: \.self) { item in
+                ForEach(["ホーム", "記録", "種目", "チャットで記録"], id: \.self) { item in
                     Button {
                         selection = item
                     } label: {
@@ -156,6 +156,7 @@ struct MainView: View {
             .padding(.horizontal, 12)
             Group {
                 if selection == "ホーム" { home }
+                else if selection == "チャットで記録" { unavailableChat }
                 else if selection == "種目" { exerciseList }
                 else { history }
             }
@@ -288,8 +289,24 @@ struct MainView: View {
         switch item {
         case "ホーム": "house"
         case "記録": "calendar"
+        case "チャットで記録": "bubble.left.and.bubble.right"
         default: "dumbbell"
         }
+    }
+
+    private var unavailableChat: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("チャットで記録")
+                .font(.system(size: 32, weight: .bold, design: .rounded))
+            ContentUnavailableView {
+                Label("AI接続はまだ利用できません", systemImage: "bubble.left.and.bubble.right")
+            } description: {
+                Text("AIへの送信は行われません。接続機能が利用可能になるまで、運動は「記録」から入力してください。")
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var history: some View {

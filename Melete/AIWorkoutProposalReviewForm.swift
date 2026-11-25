@@ -1,6 +1,8 @@
 import SwiftData
 import SwiftUI
 
+private let aiReviewUnexpectedErrorMessage = "保存処理中にエラーが発生しました。記録を確認してください。"
+
 // AIの記録候補を確認・修正し、承認したときだけ保存する画面。
 // AIへの接続は未実装で、この画面を開く入口もまだない。将来の接続画面が
 // AIWorkoutProposalCoordinator.reviewSession(for:...) で得た組と、beginRequest に渡したのと同じstoreの context を渡して使う。
@@ -36,8 +38,11 @@ private enum AIReviewFormStyle {
             let workout = try session.approve(in: context, persist: persist)
             return .saved(workoutID: workout.id)
         } catch {
-            // 失敗した場合、reviewは確認中に戻り、修正中の値もそのまま残る
-            return .failed(error.localizedDescription)
+            // 既知のドメインエラーだけ説明し、それ以外の本文は表示しない。
+            if let error = error as? AIWorkoutProposalReviewError {
+                return .failed(error.localizedDescription)
+            }
+            return .failed(aiReviewUnexpectedErrorMessage)
         }
     }
 
@@ -47,7 +52,10 @@ private enum AIReviewFormStyle {
             return .closed
         } catch {
             // 保存処理中・保存済みの候補はキャンセルできない。保存済みなのに「キャンセルした」とは扱わない
-            return .failed(error.localizedDescription)
+            if let error = error as? AIWorkoutProposalReviewError {
+                return .failed(error.localizedDescription)
+            }
+            return .failed(aiReviewUnexpectedErrorMessage)
         }
     }
 }
@@ -167,7 +175,11 @@ private enum AIReviewFormStyle {
                 // 前回の保存失敗の表示は、値を直した時点で消す（検証メッセージは常に最新の値から表示する）
                 actionError = nil
             } catch {
-                actionError = error.localizedDescription
+                if let error = error as? AIWorkoutProposalReviewError {
+                    actionError = error.localizedDescription
+                } else {
+                    actionError = aiReviewUnexpectedErrorMessage
+                }
             }
         })
     }
