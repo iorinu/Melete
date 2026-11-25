@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		00ACA143FD17BB6BCFFB6C25 /* AIResponsesRequestBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 125AE9CD302CEDDCED1F2D79 /* AIResponsesRequestBuilder.swift */; };
 		043C5451204EE62AB2804BFA /* ScratchProbeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1BB64BA12B1D527769B260 /* ScratchProbeUITests.swift */; };
+		138EB9F4E5B9F6A60006AFE8 /* AIResponsesChatProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FA3E0E4963C97A5DE9BE350 /* AIResponsesChatProvider.swift */; };
 		1B2D9B260F7B64EE334FE9FE /* MeleteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */; };
 		26F353C283684E6A04257305 /* AIResponsesStreamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4F611B71D52033933D188D7 /* AIResponsesStreamTests.swift */; };
 		28BF949D1677D17F3CAE9E56 /* WorkoutSetAdditionV2RoundTripStaleDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0E0148A2D561EB54BF4E63C /* WorkoutSetAdditionV2RoundTripStaleDraftTests.swift */; };
@@ -38,6 +39,7 @@
 		8E50466C90E546E6319AA36E /* AIWorkoutChatCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E06621A063314B3B71C760D5 /* AIWorkoutChatCoordinatorTests.swift */; };
 		91831BAFFAFA584D6E9DCABA /* StartupRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = B63DFF5A9FDE17D429352999 /* StartupRoute.swift */; };
 		925EBE931A57CF1734D2716A /* WorkoutCreationV2StaleDefinitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD51A56DBF8B717AC45A0123 /* WorkoutCreationV2StaleDefinitionTests.swift */; };
+		949C14B27CE259AC39C2F9A3 /* AIResponsesChatProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CF962D605474639676D0CA1 /* AIResponsesChatProviderTests.swift */; };
 		96B9A241D0F3EEB232A1AA72 /* StartupRouteSelectionSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 308D14CB80589606A1C4924A /* StartupRouteSelectionSafetyTests.swift */; };
 		9F34F846E819F6A9EC293793 /* SQLiteMemoryBackupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C93E033143F0FE406E7B55F /* SQLiteMemoryBackupTests.swift */; };
 		A06F558B2524260C20DB6F07 /* ScratchEvidencePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41512EDC0247A89F8F31F3E4 /* ScratchEvidencePolicy.swift */; };
@@ -100,6 +102,7 @@
 		5744EF0E54881543913A57EE /* MetricDefinitionEditingV2SafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDefinitionEditingV2SafetyTests.swift; sourceTree = "<group>"; };
 		62E0853B07361D673A7EF141 /* WorkoutSetAdditionV2BaselineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutSetAdditionV2BaselineTests.swift; sourceTree = "<group>"; };
 		6C93E033143F0FE406E7B55F /* SQLiteMemoryBackupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteMemoryBackupTests.swift; sourceTree = "<group>"; };
+		6CF962D605474639676D0CA1 /* AIResponsesChatProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIResponsesChatProviderTests.swift; sourceTree = "<group>"; };
 		6D83AC6E5281775F421E7F7E /* ExerciseNameEditingSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExerciseNameEditingSafetyTests.swift; sourceTree = "<group>"; };
 		7317DD9B5B164C0D2A5C42D1 /* V1V2MigrationScratchCoverageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V1V2MigrationScratchCoverageTests.swift; sourceTree = "<group>"; };
 		7A1BB64BA12B1D527769B260 /* ScratchProbeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScratchProbeUITests.swift; sourceTree = "<group>"; };
@@ -111,6 +114,7 @@
 		83F16CC501E442AA3860B1BF /* WorkoutSetAdditionV1ScratchStaleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutSetAdditionV1ScratchStaleTests.swift; sourceTree = "<group>"; };
 		87326F08CE3E82EC696E2EAB /* AIWorkoutProposalReviewFormTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIWorkoutProposalReviewFormTests.swift; sourceTree = "<group>"; };
 		8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeleteTests.swift; sourceTree = "<group>"; };
+		8FA3E0E4963C97A5DE9BE350 /* AIResponsesChatProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIResponsesChatProvider.swift; sourceTree = "<group>"; };
 		9AF01A7C57273F88BC55E22B /* ExerciseArchiveToggleSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExerciseArchiveToggleSafetyTests.swift; sourceTree = "<group>"; };
 		9CE6F7CE1B96CFC73101F34A /* MeleteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeleteApp.swift; sourceTree = "<group>"; };
 		A5C997364BAAE4B0E0146A30 /* SwiftDataV1BackupSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDataV1BackupSafetyTests.swift; sourceTree = "<group>"; };
@@ -137,6 +141,7 @@
 		0DE0EE3FB66F7D146F5E27B7 /* MeleteTests */ = {
 			isa = PBXGroup;
 			children = (
+				6CF962D605474639676D0CA1 /* AIResponsesChatProviderTests.swift */,
 				AB6C4495CF259785AE3445BA /* AIResponsesRequestBuilderTests.swift */,
 				F4F611B71D52033933D188D7 /* AIResponsesStreamTests.swift */,
 				E06621A063314B3B71C760D5 /* AIWorkoutChatCoordinatorTests.swift */,
@@ -216,6 +221,7 @@
 		AF6C7866463F6B9EB39E406C /* Melete */ = {
 			isa = PBXGroup;
 			children = (
+				8FA3E0E4963C97A5DE9BE350 /* AIResponsesChatProvider.swift */,
 				125AE9CD302CEDDCED1F2D79 /* AIResponsesRequestBuilder.swift */,
 				4CFBBB615C28F486CE62E3B9 /* AIResponsesStream.swift */,
 				7B2695B73C40EC38DBFBED8E /* AIWorkoutChatCoordinator.swift */,
@@ -340,6 +346,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				949C14B27CE259AC39C2F9A3 /* AIResponsesChatProviderTests.swift in Sources */,
 				76DD4E6F96240CEFAFBD43DA /* AIResponsesRequestBuilderTests.swift in Sources */,
 				26F353C283684E6A04257305 /* AIResponsesStreamTests.swift in Sources */,
 				8E50466C90E546E6319AA36E /* AIWorkoutChatCoordinatorTests.swift in Sources */,
@@ -381,6 +388,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				138EB9F4E5B9F6A60006AFE8 /* AIResponsesChatProvider.swift in Sources */,
 				00ACA143FD17BB6BCFFB6C25 /* AIResponsesRequestBuilder.swift in Sources */,
 				6EABD39946B18784434403C0 /* AIResponsesStream.swift in Sources */,
 				788A6D0F3913888435B01800 /* AIWorkoutChatCoordinator.swift in Sources */,
