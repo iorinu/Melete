@@ -19,7 +19,8 @@ import Foundation
 struct AIResponsesStreamLimits: Equatable, Sendable {
     // 受信した生バイトの累計の上限
     let maxInputBytes: Int
-    // 1イベント分（直前のイベント区切り以降に溜まった行・dataの生バイト）の上限。改行が来ない巨大な入力も止める
+    // 1イベント分（直前のイベント区切り以降の生バイト。コメント行、CRLFのLF、確定させる空行の改行も含む）の上限。
+    // 改行が来ない巨大な入力も止める
     let maxEventBytes: Int
     // 連結した出力テキスト（output_text.delta の合計）の上限
     let maxOutputBytes: Int
@@ -103,6 +104,9 @@ struct AIResponsesStreamParser: Sendable {
     private var inputByteCount = 0
     // 直前のイベント区切り（空行）以降に受け取った生バイト数
     private var eventByteCount = 0
+    // 空行でイベントを確定させた直後か。CRで確定した場合、続くLFも同じイベントのバイトとして数えるため、
+    // eventByteCount のリセットは次のイベントの最初のバイトが来るまで遅らせる
+    private var isEventDispatched = false
     // まだ改行が来ていない行のバイト。UTF-8の文字がchunk境界で分断されても、ここで行単位にまとまる
     private var lineBuffer: [UInt8] = []
     // 直前のバイトがCRだったか。CRLFを1つの改行として扱うため、続くLFを読み飛ばすのに使う
@@ -174,18 +178,26 @@ struct AIResponsesStreamParser: Sendable {
         let lf: UInt8 = 0x0A
         let cr: UInt8 = 0x0D
 
-        // CRの直後のLFは、CRLFという1つの改行の後半なので行として扱わない
-        if previousWasCR {
-            previousWasCR = false
-            if byte == lf { return }
+        // CRの直後のLFは、CRLFという1つの改行の後半。CRとLFが別々のchunkに分かれていてもここで判定できる
+        let isLFOfCRLF = previousWasCR && byte == lf
+        previousWasCR = false
+
+        // 確定済みのイベントに属さないバイトが来たら、ここから次のイベントとして数え直す。
+        // 空行のCRLFのLFは、確定させたイベント側の改行なので数え直さない
+        if isEventDispatched && !isLFOfCRLF {
+            isEventDispatched = false
+            eventByteCount = 0
         }
 
-        // 1イベント分のバイト数を数える。改行が来ない巨大な行もここで止まる
+        // 1イベント分の生バイト数を数える（CRLFのLFも含む）。改行が来ない巨大な行もここで止まる
         eventByteCount += 1
         guard eventByteCount <= limits.maxEventBytes else {
             fail(.eventLimitExceeded)
             return
         }
+
+        // CRLFのLFは、行の区切りとしてはCRの時点で処理済みなので行として扱わない
+        if isLFOfCRLF { return }
 
         switch byte {
         case lf:
@@ -253,7 +265,8 @@ struct AIResponsesStreamParser: Sendable {
         eventNameBytes = nil
         dataBytes.removeAll(keepingCapacity: true)
         hasDataLine = false
-        eventByteCount = 0
+        // eventByteCount はここでは0にしない（空行がCRLFなら、続くLFもこのイベントの分として数えるため）
+        isEventDispatched = true
 
         // data行が1つも無いブロックはイベントにならない（event行だけで完了を偽装させない）
         guard hadData else { return }

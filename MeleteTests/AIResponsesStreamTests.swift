@@ -460,6 +460,18 @@ final class AIResponsesStreamTests: XCTestCase {
         XCTAssertEqual(run(commentFlood + "\n" + completed(), limits: limits), .failure(.eventLimitExceeded))
     }
 
+    // CRLFのCRとLFはどちらも上限の生バイトとして数える。コメント行を含む境界と、空行のCRLF分割を確認する。
+    func testEventLimitCountsBothBytesOfCRLFWithCommentAndSplitBlankLine() {
+        let block = ": synthetic comment\r\ndata: {\"type\":\"response.output_text.delta\",\(rawIdentifiers),\"delta\":\"x\"}\r\n"
+        let terminator = "\r\n"
+        let eventBytes = bytes(block + terminator).count
+        let exact = AIResponsesStreamLimits(maxInputBytes: 1 << 20, maxEventBytes: eventBytes, maxOutputBytes: 1 << 16)
+        XCTAssertEqual(run([bytes(block + "\r"), bytes("\n" + completed(newline: "\r\n"))], limits: exact).result, .success("x"))
+
+        let oneTooSmall = AIResponsesStreamLimits(maxInputBytes: 1 << 20, maxEventBytes: eventBytes - 1, maxOutputBytes: 1 << 16)
+        XCTAssertEqual(run([bytes(block + "\r"), bytes("\n" + completed(newline: "\r\n"))], limits: oneTooSmall).result, .failure(.eventLimitExceeded))
+    }
+
     // イベント上限は1イベントごと。小さいイベントが多数あっても合計では判定しない
     func testEventLimitIsPerEvent() {
         let stream = String(repeating: delta("z"), count: 20) + completed()
