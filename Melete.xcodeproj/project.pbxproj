@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		00ACA143FD17BB6BCFFB6C25 /* AIResponsesRequestBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 125AE9CD302CEDDCED1F2D79 /* AIResponsesRequestBuilder.swift */; };
 		043C5451204EE62AB2804BFA /* ScratchProbeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1BB64BA12B1D527769B260 /* ScratchProbeUITests.swift */; };
 		1B2D9B260F7B64EE334FE9FE /* MeleteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */; };
 		26F353C283684E6A04257305 /* AIResponsesStreamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4F611B71D52033933D188D7 /* AIResponsesStreamTests.swift */; };
@@ -28,6 +29,7 @@
 		6EABD39946B18784434403C0 /* AIResponsesStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CFBBB615C28F486CE62E3B9 /* AIResponsesStream.swift */; };
 		74A98FC8EBEA0ED7DADD2BA4 /* AIWorkoutProposalReviewFormTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87326F08CE3E82EC696E2EAB /* AIWorkoutProposalReviewFormTests.swift */; };
 		76AD19C1F70C0F7C0009A7BB /* ScratchEvidencePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41512EDC0247A89F8F31F3E4 /* ScratchEvidencePolicy.swift */; };
+		76DD4E6F96240CEFAFBD43DA /* AIResponsesRequestBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB6C4495CF259785AE3445BA /* AIResponsesRequestBuilderTests.swift */; };
 		788A6D0F3913888435B01800 /* AIWorkoutChatCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B2695B73C40EC38DBFBED8E /* AIWorkoutChatCoordinator.swift */; };
 		7AD4BA35E51CF214284E8585 /* MetricDefinitionEditingV1ScratchSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02CF2836E0B70B22EFFA764A /* MetricDefinitionEditingV1ScratchSafetyTests.swift */; };
 		7B220F4FE0B9311111D73B58 /* Forms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D01079DB1973F4AB20BAA97 /* Forms.swift */; };
@@ -79,6 +81,7 @@
 		02CF2836E0B70B22EFFA764A /* MetricDefinitionEditingV1ScratchSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDefinitionEditingV1ScratchSafetyTests.swift; sourceTree = "<group>"; };
 		060EE2CD5220532F134E4EEA /* MeleteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeleteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		099BE77771820601CF811F1C /* AIWorkoutChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIWorkoutChatView.swift; sourceTree = "<group>"; };
+		125AE9CD302CEDDCED1F2D79 /* AIResponsesRequestBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIResponsesRequestBuilder.swift; sourceTree = "<group>"; };
 		1D01079DB1973F4AB20BAA97 /* Forms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Forms.swift; sourceTree = "<group>"; };
 		259144994B35EF35E28C6AC1 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		28305B2452610AFE9FDB7B4C /* MetricDefinitionDraftCancellationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDefinitionDraftCancellationTests.swift; sourceTree = "<group>"; };
@@ -111,6 +114,7 @@
 		9AF01A7C57273F88BC55E22B /* ExerciseArchiveToggleSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExerciseArchiveToggleSafetyTests.swift; sourceTree = "<group>"; };
 		9CE6F7CE1B96CFC73101F34A /* MeleteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeleteApp.swift; sourceTree = "<group>"; };
 		A5C997364BAAE4B0E0146A30 /* SwiftDataV1BackupSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDataV1BackupSafetyTests.swift; sourceTree = "<group>"; };
+		AB6C4495CF259785AE3445BA /* AIResponsesRequestBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIResponsesRequestBuilderTests.swift; sourceTree = "<group>"; };
 		AD51A56DBF8B717AC45A0123 /* WorkoutCreationV2StaleDefinitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutCreationV2StaleDefinitionTests.swift; sourceTree = "<group>"; };
 		B0E0148A2D561EB54BF4E63C /* WorkoutSetAdditionV2RoundTripStaleDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutSetAdditionV2RoundTripStaleDraftTests.swift; sourceTree = "<group>"; };
 		B63DFF5A9FDE17D429352999 /* StartupRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRoute.swift; sourceTree = "<group>"; };
@@ -133,6 +137,7 @@
 		0DE0EE3FB66F7D146F5E27B7 /* MeleteTests */ = {
 			isa = PBXGroup;
 			children = (
+				AB6C4495CF259785AE3445BA /* AIResponsesRequestBuilderTests.swift */,
 				F4F611B71D52033933D188D7 /* AIResponsesStreamTests.swift */,
 				E06621A063314B3B71C760D5 /* AIWorkoutChatCoordinatorTests.swift */,
 				3EC2965F5949A51EE04F250E /* AIWorkoutChatPresentationTests.swift */,
@@ -211,6 +216,7 @@
 		AF6C7866463F6B9EB39E406C /* Melete */ = {
 			isa = PBXGroup;
 			children = (
+				125AE9CD302CEDDCED1F2D79 /* AIResponsesRequestBuilder.swift */,
 				4CFBBB615C28F486CE62E3B9 /* AIResponsesStream.swift */,
 				7B2695B73C40EC38DBFBED8E /* AIWorkoutChatCoordinator.swift */,
 				7FF1596660ACAA92398CC08B /* AIWorkoutChatPresentation.swift */,
@@ -334,6 +340,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				76DD4E6F96240CEFAFBD43DA /* AIResponsesRequestBuilderTests.swift in Sources */,
 				26F353C283684E6A04257305 /* AIResponsesStreamTests.swift in Sources */,
 				8E50466C90E546E6319AA36E /* AIWorkoutChatCoordinatorTests.swift in Sources */,
 				389429AF91C67B2C58B48433 /* AIWorkoutChatPresentationTests.swift in Sources */,
@@ -374,6 +381,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				00ACA143FD17BB6BCFFB6C25 /* AIResponsesRequestBuilder.swift in Sources */,
 				6EABD39946B18784434403C0 /* AIResponsesStream.swift in Sources */,
 				788A6D0F3913888435B01800 /* AIWorkoutChatCoordinator.swift in Sources */,
 				2BD4A8D09A35F203390F0D46 /* AIWorkoutChatPresentation.swift in Sources */,
