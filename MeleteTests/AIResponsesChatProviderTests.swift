@@ -60,6 +60,105 @@ final class AIResponsesChatProviderTests: XCTestCase {
         }
     }
 
+    // 不正な合成SSEを1回だけcallbackへ渡し、callbackのthrowをそのまま投げ直す合成transport。
+    // cancelsCurrentTaskがtrueなら、callbackより前にreceiveを実行中のTask自身を取消す。
+    // 状態はインスタンスごとに持ち、テスト間で共有しない。
+    private final class InvalidSSECallbackTransport: AIResponsesChunkTransport {
+        // JSONとして解釈できないdata行。parserはmalformedEventで失敗する
+        static let invalidChunk = Data("data: {synthetic-invalid-json\n\n".utf8)
+
+        private let cancelsCurrentTask: Bool
+        private(set) var receiveCount = 0
+        private(set) var callbackCount = 0
+        private(set) var cancelledBeforeCallback = false
+        private(set) var callbackError: (any Error)?
+
+        init(cancelsCurrentTask: Bool) { self.cancelsCurrentTask = cancelsCurrentTask }
+
+        func receive(body: Data, onChunk: @MainActor (Data) throws -> Void) async throws {
+            receiveCount += 1
+            if cancelsCurrentTask {
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+            cancelledBeforeCallback = Task.isCancelled
+            callbackCount += 1
+            do {
+                try onChunk(Self.invalidChunk)
+            } catch {
+                callbackError = error
+                throw error
+            }
+        }
+    }
+
+    // provider.sendを別Taskで動かし、制限時間付きで終了を待つ。取消するTaskをテスト本体と分けるため。
+    // 制限を超えたらTaskを取消し、さらに制限時間付きで終了を待って回収する。回収できなければ明示的に失敗させる。
+    // 合成transportの状態はテストごとのインスタンスなので、回収できなくても他のテストの状態は汚さない。
+    private func runProviderSend(_ provider: AIResponsesChatProvider, request: AIWorkoutChatRequest,
+                                 timeout: TimeInterval = 5,
+                                 reclaimTimeout: TimeInterval = 5) async -> Result<AIWorkoutChatResponse, any Error>? {
+        @MainActor final class Box {
+            var result: Result<AIWorkoutChatResponse, any Error>?
+        }
+        let box = Box()
+        let task = Task { @MainActor in
+            do {
+                box.result = .success(try await provider.send(request))
+            } catch {
+                box.result = .failure(error)
+            }
+        }
+        if await waitWithin(seconds: timeout, { box.result != nil }) {
+            return box.result
+        }
+        task.cancel()
+        if await waitWithin(seconds: reclaimTimeout, { box.result != nil }) {
+            XCTFail("provider.sendが制限時間内に終わらなかった（取消後に回収済み）")
+        } else {
+            XCTFail("provider.sendが制限時間内に終わらず、取消後も回収できなかった")
+        }
+        return nil
+    }
+
+    // 取消済みのTaskで、transportが不正SSEをcallbackへ渡してparser failureを返しても、
+    // provider.sendはparserの失敗ではなくCancellationErrorで終わる。
+    func testCancellationWinsOverParserFailureReturnedFromCallback() async throws {
+        let request = try await captureValidChatRequest()
+        let transport = InvalidSSECallbackTransport(cancelsCurrentTask: true)
+        let provider = AIResponsesChatProvider(model: "synthetic-model", transport: transport)
+
+        let result = await runProviderSend(provider, request: request)
+
+        XCTAssertEqual(transport.receiveCount, 1)
+        XCTAssertTrue(transport.cancelledBeforeCallback, "callbackより前に同じTaskが取消されていない")
+        XCTAssertEqual(transport.callbackCount, 1)
+        XCTAssertEqual(transport.callbackError as? AIResponsesStreamFailure, .malformedEvent,
+                       "callbackがparser failureを返していない")
+        guard case .failure(let error)? = result else {
+            return XCTFail("CancellationErrorで終わるべき: \(String(describing: result))")
+        }
+        XCTAssertTrue(error is CancellationError, "取消がparser failureより優先されるべき: \(error)")
+        XCTAssertNil(error as? AIResponsesStreamFailure, "取消済みなのにparser failureがそのまま投げられた")
+    }
+
+    // 対照: 取消がなければ、callbackが返したparser failureをそのまま投げる。
+    func testParserFailureFromCallbackIsKeptWithoutCancellation() async throws {
+        let request = try await captureValidChatRequest()
+        let transport = InvalidSSECallbackTransport(cancelsCurrentTask: false)
+        let provider = AIResponsesChatProvider(model: "synthetic-model", transport: transport)
+
+        let result = await runProviderSend(provider, request: request)
+
+        XCTAssertEqual(transport.receiveCount, 1)
+        XCTAssertFalse(transport.cancelledBeforeCallback)
+        XCTAssertEqual(transport.callbackCount, 1)
+        XCTAssertEqual(transport.callbackError as? AIResponsesStreamFailure, .malformedEvent)
+        guard case .failure(let error)? = result else {
+            return XCTFail("parser failureで終わるべき: \(String(describing: result))")
+        }
+        XCTAssertEqual(error as? AIResponsesStreamFailure, .malformedEvent, "parser failureをそのまま投げるべき: \(error)")
+    }
+
     func testSyntheticChunksReturnQuestionWithoutSavingWorkout() async throws {
         let schema = Schema(versionedSchema: MeleteSchemaV1.self)
         let configuration = ModelConfiguration("AIResponsesChatProviderMemory-\(UUID())", schema: schema,
@@ -230,6 +329,16 @@ final class AIResponsesChatProviderTests: XCTestCase {
 
     private func waitUntil(_ condition: @MainActor () -> Bool) async -> Bool {
         for _ in 0..<100 {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
+    // MainActorを手放しながら条件を待つ。制限時間を過ぎたら最後に一度だけ確かめて返す。
+    private func waitWithin(seconds: TimeInterval, _ condition: @MainActor () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(seconds)
+        while ContinuousClock.now < deadline {
             if condition() { return true }
             try? await Task.sleep(for: .milliseconds(10))
         }

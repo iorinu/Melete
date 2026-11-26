@@ -5,6 +5,7 @@ import Foundation
 @MainActor protocol AIResponsesChunkTransport {
     // return/throwは送受信が実際に停止した後にだけ行う。
     // onChunkがthrowした場合やTask.cancelを受けた場合も、I/Oを停止して終了を待ってから返す。
+    // 取消された場合は、onChunkのエラーよりCancellationErrorを優先して投げる。
     // callback方式にして、未処理chunkの無制限なbufferやproducerの取り残しを避ける。
     func receive(body: Data, onChunk: @MainActor (Data) throws -> Void) async throws
 }
@@ -39,12 +40,13 @@ import Foundation
                 }
             }
         } catch {
-            // parserの失敗理由だけを保持し、transport由来の内容は外へ出さない。
-            if case .failed(let failure) = parser.state {
-                throw failure
-            }
+            // 取消をparserの失敗より優先する。取消済みならparserの失敗が残っていてもCancellationErrorにする。
             if error is CancellationError || Task.isCancelled {
                 throw CancellationError()
+            }
+            // 取消がなければparserの失敗理由だけを保持し、transport由来の内容は外へ出さない。
+            if case .failed(let failure) = parser.state {
+                throw failure
             }
             throw AIResponsesChatProviderError.transportFailed
         }
