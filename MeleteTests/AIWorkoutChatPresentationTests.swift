@@ -215,3 +215,136 @@ final class AIWorkoutChatPresentationTests: XCTestCase {
         XCTAssertEqual(secondFixture.presentation.pendingQuestion, "何セットですか？")
     }
 }
+
+// 通常画面の「チャットで記録」から開くデモを、factoryが作るmemory-only storeだけで確かめる。
+// 実ストア・ネットワークには触れない（factoryは外からcontainerを受け取らない）。
+@MainActor
+final class AIWorkoutChatDemoTests: XCTestCase {
+    private func count(_ session: AIWorkoutChatDemoSession) throws -> Int {
+        try ModelContext(session.container).fetchCount(FetchDescriptor<Workout>())
+    }
+
+    // 1往復目（質問）→2往復目（候補）まで進めて、確認中のsessionを返す
+    private func advanceToReview(_ demo: AIWorkoutChatDemoSession, first: String = "合成の依頼", answer: String = "合成の回答") async throws -> AIWorkoutProposalCoordinator.ReviewSession {
+        demo.presentation.inputText = first
+        await demo.presentation.submit()
+        XCTAssertEqual(demo.presentation.pendingQuestion, AIWorkoutChatDemoSession.question)
+        XCTAssertNil(demo.presentation.reviewSession)
+        demo.presentation.inputText = answer
+        await demo.presentation.submit()
+        return try XCTUnwrap(demo.presentation.reviewSession)
+    }
+
+    func testFactoryCreatesSeparateMemoryOnlyV1StoreWithFixedSyntheticSeed() throws {
+        let demo = try AIWorkoutChatDemoSession.make()
+        XCTAssertFalse(demo.container.configurations.isEmpty)
+        XCTAssertTrue(demo.container.configurations.allSatisfy(\.isStoredInMemoryOnly))
+        XCTAssertEqual(Set(demo.container.schema.entities.map(\.name)),
+                       Set(Schema(versionedSchema: MeleteSchemaV1.self).entities.map(\.name)))
+        // 表示・承認に使うcontextは、modelContainer環境と同じデモcontainerのmainContext
+        XCTAssertTrue(demo.context.container === demo.container)
+        XCTAssertTrue(demo.context === demo.container.mainContext)
+        XCTAssertFalse(demo.context.hasChanges)
+
+        let exercises = try ModelContext(demo.container).fetch(FetchDescriptor<Exercise>())
+        XCTAssertEqual(exercises.map(\.id), [demo.exerciseID])
+        XCTAssertEqual(exercises.first?.name, AIWorkoutChatDemoSession.exerciseName)
+        let metrics = try XCTUnwrap(exercises.first).metrics.sorted { $0.sortOrder < $1.sortOrder }
+        XCTAssertEqual(metrics.map(\.unit), ["kg", "回"])
+        XCTAssertEqual(try count(demo), 0)
+
+        // 開くたびに別のmemory storeになり、前のデモの内容を共有しない
+        let other = try AIWorkoutChatDemoSession.make()
+        XCTAssertFalse(other.container === demo.container)
+        XCTAssertNotEqual(other.exerciseID, demo.exerciseID)
+    }
+
+    func testScriptAsksQuestionThenProposesFixedValuesIgnoringInputAndSavesNothingBeforeApproval() async throws {
+        let calendar = WorkoutCalendarLogic.calendar(timeZone: .current)
+        let demo = try AIWorkoutChatDemoSession.make(calendar: calendar)
+        let session = try await advanceToReview(demo, first: "合成の依頼A", answer: "99セット 123kg")
+        XCTAssertEqual(try count(demo), 0)
+        XCTAssertFalse(demo.context.hasChanges)
+
+        let entry = try XCTUnwrap(session.review.entries.first)
+        XCTAssertEqual(session.review.entries.count, 1)
+        XCTAssertEqual(entry.exerciseID, demo.exerciseID)
+        // 入力の数値は解釈せず、固定の合成値だけを候補にする
+        XCTAssertEqual(entry.sets.count, AIWorkoutChatDemoSession.setCount)
+        for set in entry.sets {
+            XCTAssertEqual(set.values[demo.weightMetricID], AIWorkoutChatDemoSession.weightValue)
+            XCTAssertEqual(set.values[demo.repsMetricID], AIWorkoutChatDemoSession.repsValue)
+        }
+        XCTAssertLessThanOrEqual(calendar.startOfDay(for: session.review.day), calendar.startOfDay(for: .now))
+
+        // 別の入力でも同じ候補になる（入力内容が候補に反映されたと誤認させない）
+        let other = try AIWorkoutChatDemoSession.make(calendar: calendar)
+        let otherSession = try await advanceToReview(other, first: "全く別の依頼", answer: "1セット")
+        XCTAssertEqual(otherSession.review.entries.first?.sets.map { $0.values[other.weightMetricID] },
+                       entry.sets.map { $0.values[demo.weightMetricID] })
+    }
+
+    func testCancelledReviewSavesNothingAndConversationCanBeRestarted() async throws {
+        let demo = try AIWorkoutChatDemoSession.make()
+        let session = try await advanceToReview(demo)
+
+        // シートを外から閉じた場合は確認中のまま残り、再表示できる
+        demo.presentation.refreshReviewState()
+        XCTAssertEqual(demo.presentation.reviewSession?.id, session.id)
+
+        XCTAssertEqual(AIWorkoutProposalReviewFormAction.cancel(session), .closed)
+        demo.presentation.refreshReviewState()
+        XCTAssertNil(demo.presentation.reviewSession)
+        XCTAssertEqual(try count(demo), 0)
+        XCTAssertFalse(demo.context.hasChanges)
+
+        // 取消後も同じデモで再送でき、台本は質問から始まる
+        let next = try await advanceToReview(demo)
+        XCTAssertNotEqual(next.id, session.id)
+        XCTAssertEqual(try count(demo), 0)
+    }
+
+    func testExplicitApprovalSavesOnlyIntoDemoStore() async throws {
+        let demo = try AIWorkoutChatDemoSession.make()
+        let unrelated = try AIWorkoutChatDemoSession.make()
+        let session = try await advanceToReview(demo)
+
+        // 別のstoreのcontextでは承認できない（デモの候補を他のstoreへ保存しない）
+        guard case .failed = AIWorkoutProposalReviewFormAction.approve(session, in: unrelated.context) else {
+            return XCTFail("別storeでの承認は拒否されること")
+        }
+        XCTAssertEqual(try count(unrelated), 0)
+        XCTAssertEqual(try count(demo), 0)
+
+        guard case let .saved(workoutID) = AIWorkoutProposalReviewFormAction.approve(session, in: demo.context) else {
+            return XCTFail("デモcontextでの明示承認で保存できること")
+        }
+        demo.presentation.refreshReviewState()
+        XCTAssertNil(demo.presentation.reviewSession)
+        XCTAssertEqual(try count(demo), 1)
+        XCTAssertEqual(try count(unrelated), 0)
+        XCTAssertFalse(demo.context.hasChanges)
+        let workout = try XCTUnwrap(ModelContext(demo.container).fetch(FetchDescriptor<Workout>()).first)
+        XCTAssertEqual(workout.id, workoutID)
+        XCTAssertEqual(workout.records.first?.sets.count, AIWorkoutChatDemoSession.setCount)
+
+        // 保存後に同じsessionを再承認しても二重に保存しない
+        _ = AIWorkoutProposalReviewFormAction.approve(session, in: demo.context)
+        XCTAssertEqual(try count(demo), 1)
+
+        // 保存後も次の会話を始められる
+        _ = try await advanceToReview(demo)
+        XCTAssertEqual(try count(demo), 1)
+    }
+
+    func testPreparationFailsClosedWithFixedMessage() {
+        struct SyntheticFailure: LocalizedError { var errorDescription: String? { "内部の詳細" } }
+        guard case let .failed(message) = AIWorkoutChatDemoSession.prepare(using: { throw SyntheticFailure() }) else {
+            return XCTFail("初期化失敗はfailedになること")
+        }
+        XCTAssertEqual(message, AIWorkoutChatDemoSession.unavailableMessage)
+        XCTAssertFalse(message.contains("内部の詳細"))
+
+        guard case .ready = AIWorkoutChatDemoSession.prepare() else { return XCTFail("通常はデモを準備できること") }
+    }
+}

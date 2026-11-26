@@ -4,8 +4,10 @@ import SwiftData
 
 // 会話の入力文から、AIの記録候補の確認画面(ReviewSession)までをつなぐ、接続方式に依存しない部分。
 // ここにあるのは「AIへ渡す内容の型」「接続先(provider)の差し込み口」「1回の依頼の進行管理」だけで、
-// 実際の接続先（Codex CLI・直接接続などの設計案）・通常画面への配線・ネットワーク通信は含まない。
-// 本番コードには provider の実装がなく、このcoordinatorを作る箇所もない（テストで擬似providerを注入して使うだけ）。
+// 実際の接続先の実装やネットワーク通信はこのファイルには含まない
+// （Responses API向けの通信部品は AIResponsesChatProvider.swift・AIResponsesHTTPTransport.swift にある）。
+// 本番コードには実サービスへ接続するproviderの配線がなく、このcoordinatorを作るのは
+// 通常画面から開く外部通信なしの固定台本デモ（AIWorkoutChatDemoSession。デモ用memory storeのみ）とテストだけ。
 // 候補の検証・reviewの作成・承認と保存は、既存の AIWorkoutProposalCoordinator にすべて任せる。
 
 // MARK: - AIへ渡す内容

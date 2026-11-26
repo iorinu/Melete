@@ -1,10 +1,10 @@
 # 会話から運動記録を作る仕組み（設計メモ）
 
 状態: 設計メモ（ユーザー確認待ち）。実装済み仕様ではない。
-基準: 現行コード（`Melete/AIWorkoutProposal.swift`、`Melete/AIWorkoutProposalReviewForm.swift`、`Melete/AIWorkoutChatCoordinator.swift`、`Melete/AIWorkoutChatPresentation.swift`、`Melete/AIWorkoutChatView.swift`、`Melete/MainView.swift`、`Melete/Models.swift`）と `docs/design-doc.md` 第7章（ユーザー確認待ちの設計案）
+基準: 現行コード（`Melete/AIWorkoutProposal.swift`、`Melete/AIWorkoutProposalReviewForm.swift`、`Melete/AIWorkoutChatCoordinator.swift`、`Melete/AIWorkoutChatPresentation.swift`、`Melete/AIWorkoutChatView.swift`、`Melete/AIResponsesChatProvider.swift`、`Melete/AIResponsesHTTPTransport.swift`、`Melete/MainView.swift`、`Melete/Models.swift`）と `docs/design-doc.md` 第7章（ユーザー確認待ちの設計案）
 作成日: 2026-11-23
 
-このメモは、「今日ベンチプレス60kgで10回3セット」のような会話から運動記録を作る仕組みについて、設計案と現在の実装状況を区別して記録します。候補検証・確認フォーム・聞き返しcoordinator・presentation層は実装され、合成データと擬似providerを使うテストで検証されています。一方、本番provider／通信は未実装で、通常サイドバーの「チャットで記録」は未接続の案内だけです。実画面と実サービスを組み合わせた動作は未検証です。以下の全体フローや将来案は確定仕様ではありません。
+このメモは、「今日ベンチプレス60kgで10回3セット」のような会話から運動記録を作る仕組みについて、設計案と現在の実装状況を区別して記録します。候補検証・確認フォーム・聞き返しcoordinator・presentation層は実装され、合成データと擬似providerを使うテストで検証されています。Responses API向けのproviderとHTTP transportの部品もありますが、テストから合成transport・合成endpointで使うだけで、認証情報の扱いは未実装です。実サービスへ接続する経路は通常画面に配線されていません。通常サイドバーの「チャットで記録」は、外部通信をしない固定台本のデモだけを開きます（1.2節）。実画面と実サービスを組み合わせた動作は未検証です。以下の全体フローや将来案は確定仕様ではありません。
 
 ## 1. 現在の実装状況
 
@@ -15,11 +15,11 @@
 | 通常V1の新規運動記録の保存 | **実装済み**。通常画面の記録フォームから使われる | `MainView.saveWorkout` → `WorkoutCreationV1.save`（`Melete/Models.swift`） |
 | 通常V1の種目新規作成 | **実装済み**。運動記録とは別に、単独で保存する | `MainView.saveExercise` → `ExerciseCreationInContext.save` |
 | V2スキーマ | **実験段階**。`--melete-v2-experimental` を付けた隔離ストアの起動でだけ使う。通常ストアはV1のまま | `StartupRoute`、`MeleteApp`、`MainView.StoreMode.isolatedV2Experimental` |
-| AIへの本番接続・通信 | **未実装**。provider protocolの差し込み口と、擬似providerで使う会話進行管理はあるが、本番provider・通信実装はない | `AIWorkoutChatCoordinator.swift` |
+| AIへの本番接続・通信 | **通信部品のみ実装。接続は未実装**。Responses API向けのprovider（`AIResponsesChatProvider`）と、固定の本番endpointへ送るHTTP transport（`AIResponsesHTTPTransport`）はある。ただし認証情報の取得・保管と通常画面への配線は未実装で、テストは合成transport・合成endpointだけを使う。実サービスとの相互運用は未確認 | `AIWorkoutChatCoordinator.swift`、`AIResponsesChatProvider.swift`、`AIResponsesHTTPTransport.swift`、`MeleteTests/AIResponsesChatProviderTests.swift`、`MeleteTests/AIResponsesHTTPTransportTests.swift` |
 | 聞き返しcoordinator・presentation層 | **実装済み**。質問・回答履歴・送信状態・候補への接続を管理する。合成providerとmemory-only storeを使う合成テストで検証済み | `AIWorkoutChatCoordinator.swift`、`AIWorkoutChatPresentation.swift`、`MeleteTests/AIWorkoutChatCoordinatorTests.swift`、`MeleteTests/AIWorkoutChatPresentationTests.swift` |
 | 構造化候補の検証・確認フォーム・承認 | **実装済み**。候補を検証してreviewを作り、数値を確認・修正して明示承認した場合だけ通常V1保存境界へ渡す。合成データのテストで検証済み | `AIWorkoutProposal.swift`、`AIWorkoutProposalReviewForm.swift`、`MeleteTests/AIWorkoutProposalTests.swift`、`MeleteTests/AIWorkoutProposalReviewFormTests.swift` |
-| チャット画面 | **実装済みだが通常画面には未接続**。`AIWorkoutChatView` はpresentation層を表示するが、providerを用意して通常画面から構築する経路はない | `AIWorkoutChatView.swift`、`MainView.swift` |
-| 通常サイドバーのチャット操作 | **利用不可**。「チャットで記録」はAI接続が未利用である旨の案内を表示するだけで、送信操作はない | `MainView.swift` の `unavailableChat` |
+| チャット画面 | **実装済み。通常画面からはデモとしてだけ開く**。実際のAIのproviderで構築する経路はない | `AIWorkoutChatView.swift`、`MainView.swift` |
+| 通常サイドバーのチャット操作 | **デモのみ**。「チャットで記録」は外部通信なしの固定台本デモを開く。実AIへの送信はしない。詳細は1.2節 | `MainView.swift` の `chatDemoPane`、`AIWorkoutChatView.swift` の `AIWorkoutChatDemoSession` |
 | 実画面と実サービスを組み合わせた動作 | **未検証**。合成テストの結果を本番providerや通常画面からの操作の検証とは扱わない | 上記各テスト、`MainView.swift` |
 | 種目の新規作成と運動記録の同時保存（原子性） | **未実装**。2つの保存境界はそれぞれ独立して `save` を行う | `ExerciseCreationInContext` と `WorkoutCreationV1` |
 
@@ -35,9 +35,19 @@ AIの候補を保存するときに再利用を目指す部分なので、現行
 
 入力は `WorkoutEntryDraft`（種目と、項目IDをキーにした文字列のセット値）です。実装では候補をこの形に変換して検証し、合成テストでその処理を確認しています。実サービスからの応答や通常画面との結合動作を検証したという意味ではありません。
 
+### 1.2 通常画面のチャットのデモ（現行コード）
+
+「チャットで記録」を開くと、画面に「デモ（合成AI・外部通信なし）」と表示したうえで、既存の `AIWorkoutChatView` を開きます。実際のAIの動作ではありません。
+
+- **保存先**: `AIWorkoutChatDemoSession.make` が毎回新しく作る、memory-onlyのV1 storeだけです。このfactoryは外からcontainerを受け取りません。通常ストアやV2検証用ストアのcontext・種目は参照しません。チャット画面の `modelContainer` 環境もデモのcontainerに差し替えます。V2検証用の起動でも同じV1形式のデモ用メモリを使い、V2としては保存しません。
+- **台本**: 外部通信はしません。入力文も解釈しません。新しい会話には固定の質問を返し、その回答には固定の合成種目と固定の合成値の候補を返します。日付は依頼時の今日です。候補の形式は現行の `createWorkout` で、通常の候補と同じ検証を通ります。入力した数値が候補に反映されないことを画面に表示します。
+- **保存の条件**: 確認画面で「承認して保存」を押したときだけ、デモ用storeへ保存します。承認前と、確認画面でキャンセルしたときは何も保存しません。保存した記録は通常の履歴に反映されません。ウィンドウを閉じると消えます。
+- **状態の保持**: デモは `MainView` の `@State` に1度だけ作って保持します。画面を切り替えても会話や確認中の候補は失われません。初期化に失敗した場合は固定のエラーを表示し、通常ストアへは切り替えません。
+- **検証範囲**: `MeleteTests/AIWorkoutChatPresentationTests.swift` の `AIWorkoutChatDemoTests` に、memory-only storeだけを使う単体テストがあります。画面操作（GUI）での動作は未検証です。
+
 ## 2. 全体の流れ
 
-以下は `docs/design-doc.md` の設計案を説明する概念フローです。本番providerと通常画面への接続が未実装のため、現行アプリでこの一連の操作を利用できるという意味ではありません。
+以下は `docs/design-doc.md` の設計案を説明する概念フローです。通常画面から開けるのは固定台本のデモ（1.2節）だけで、実サービスへの接続は配線・認証とも未実装のため、現行アプリで実際のAIを使ってこの一連の操作を利用できるという意味ではありません。
 
 例として、利用者が「今日ベンチプレス60kgで10回3セット」と入力した場合を考えます。
 
@@ -117,7 +127,7 @@ sequenceDiagram
 | 日付 | 「今日」「昨日」をどのローカル日付と解釈したか。未来の日付は受け付けない |
 | 曖昧さ | 当てはまる種目が複数ある、セット数がはっきりしない、など |
 
-値・日付・実在などは候補からreviewを作る時点で検証され、承認時にもreviewの修正値を含めて `WorkoutCreationV1.save` の境界で再検証されます。この経路はコードと合成テストで実装済みです。実サービスからの候補受信は未実装です。
+値・日付・実在などは候補からreviewを作る時点で検証され、承認時にもreviewの修正値を含めて `WorkoutCreationV1.save` の境界で再検証されます。この経路はコードと合成テストで実装済みです。実サービスからの候補受信は、provider・transportの部品はあるものの認証と通常画面への配線が未実装で、実サービスとの相互運用も未確認です。
 
 ### 3.3 聞き返すケース
 
@@ -132,8 +142,8 @@ sequenceDiagram
 
 ### 4.1 AIにできること・できないこと
 
-- **設計案**ではAIは「候補を返す」だけとし、記録DBへの直接書き込み、任意のファイル操作、コマンド実行を許可しないことを目指します（design-doc 7.2節）。providerの実装はなく、この権限制御はまだ適用・検証されていません。
-- 候補reviewの保存経路は明示承認を経る実装ですが、本番AI接続は未実装です。
+- **設計案**ではAIは「候補を返す」だけとし、記録DBへの直接書き込み、任意のファイル操作、コマンド実行を許可しないことを目指します（design-doc 7.2節）。Responses API向けproviderの部品はありますが実サービスへは接続しておらず、この権限制御はまだ適用・検証されていません。
+- 候補reviewの保存経路は明示承認を経る実装ですが、実サービスへの接続（認証・通常画面への配線）は未実装です。
 - **権限の境界は未検証です。** プロンプトで禁止するだけでは境界とみなしません。design-doc 7.2節に書いたとおり、接続方式が持つ制限を実際に適用・検証できない場合は、連携を有効にしません。
 
 ### 4.2 ログ・秘密情報・外部送信の同意
@@ -144,7 +154,7 @@ sequenceDiagram
 
 ### 4.3 二重実行・競合・複数変更
 
-- **二重実行**: 実装はリクエストIDごとにreviewを一元管理し、同一coordinatorインスタンス内で同じIDの応答からreviewを重複作成せず、保存成功後の再承認も拒否します。保存中の再入も拒否されます。ただし保証は同一アプリセッション内の同じcoordinatorインスタンスに限られ、複数coordinator間や再起動後の再送は防ぎません。別IDなら内容が同じでも別依頼として保存できます。ネットワークの自動再試行で同じ送信を続ける場合にIDを再利用する責務は未実装provider側に残っています。
+- **二重実行**: 実装はリクエストIDごとにreviewを一元管理し、同一coordinatorインスタンス内で同じIDの応答からreviewを重複作成せず、保存成功後の再承認も拒否します。保存中の再入も拒否されます。ただし保証は同一アプリセッション内の同じcoordinatorインスタンスに限られ、複数coordinator間や再起動後の再送は防ぎません。別IDなら内容が同じでも別依頼として保存できます。ネットワークの自動再試行で同じ送信を続ける場合にIDを再利用する責務はprovider側に残っています。現行の `AIResponsesChatProvider` と `AIResponsesHTTPTransport` に自動再試行はありません。
 - **競合**: 確認画面を開いている間に種目名や項目定義が変わった場合は保存せず、もう一度確認してもらいます。現行の `WorkoutCreationV1.save` は、こうした変化を `staleDefinition` として拒否します。
 - **複数変更の原子性**: 1回の承認に複数の変更が含まれる場合は、全部保存するか、何も保存しないかのどちらかにします。現行の `WorkoutCreationV1.save` は、1回の運動記録に含まれる複数の種目・セットをまとめて保存し、失敗時に `rollback` します。一方、種目の作成と記録を一緒に保存する仕組みはありません（5章）。
 
@@ -176,7 +186,7 @@ flowchart TD
 
 ## 6. AIの接続方式について
 
-Codex CLI経由とChatGPTへの直接接続は `docs/design-doc.md` 7.1節にある設計案のままで、どちらも実装されていません。利用条件・認証・安全な権限制御を含め、実現方法は確定していません。このメモでは料金や利用条件を推測・判断しません。
+Codex CLI経由とChatGPTへの直接接続は `docs/design-doc.md` 7.1節にある設計案のままで、どちらも接続方式としては実装されていません。現行コードにはResponses API向けのprovider・HTTP transportの部品がありますが、認証と通常画面への配線は未実装で、実サービスとの相互運用も未確認です。利用条件・認証・安全な権限制御を含め、実現方法は確定していません。このメモでは料金や利用条件を推測・判断しません。
 
 構造化候補の検証・確認画面・保存は接続方式に依存させず、共通の仕組みにする方針です（design-doc 4章「AIアダプター」）。
 

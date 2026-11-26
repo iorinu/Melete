@@ -4,7 +4,7 @@ import SwiftUI
 private let aiReviewUnexpectedErrorMessage = "保存処理中にエラーが発生しました。記録を確認してください。"
 
 // AIの記録候補を確認・修正し、承認したときだけ保存する画面。
-// AIへの接続は未実装で、この画面を開く入口もまだない。将来の接続画面が
+// AIへの接続は未実装で、現在この画面を開くのは通常画面のチャットのデモ（デモ用memory storeのみ）だけ。将来の接続画面が
 // AIWorkoutProposalCoordinator.reviewSession(for:...) で得た組と、beginRequest に渡したのと同じstoreの context を渡して使う。
 // 表示・修正する値は review が持つものだけを使い、この画面には値のコピーを持たない（表示と保存内容を食い違わせないため）
 
@@ -66,6 +66,8 @@ private enum AIReviewFormStyle {
     let session: AIWorkoutProposalCoordinator.ReviewSession
     // beginRequest に渡したのと同じstore（container）の context。別storeなら coordinator が storeMismatch で拒否する
     let context: ModelContext
+    // 保存先などの補足（デモでは保存先がデモ用メモリだけであることを示す）。nilなら表示しない
+    var notice: String? = nil
     @State private var actionError: String?
     // 保存またはキャンセルが確定した後は、閉じ終わるまで一切の操作を受け付けない
     @State private var isFinished = false
@@ -83,6 +85,12 @@ private enum AIReviewFormStyle {
                 Text("AIの記録候補を確認").font(.system(.title, design: .rounded).weight(.bold))
                 Text("内容を確認し、必要なら数値を直してください。「承認して保存」を押したときだけ記録します。日付・種目・セット数はこの画面では変更できません。")
                     .font(.subheadline).foregroundStyle(.secondary)
+                if let notice {
+                    Label(notice, systemImage: "theatermasks")
+                        .font(.subheadline.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("aiProposalReviewNotice")
+                }
             }
             Form {
                 LabeledContent("運動日") {

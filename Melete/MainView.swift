@@ -116,6 +116,9 @@ struct MainView: View {
     @State private var errorMessage: String?
     @State private var displayedMonth = Calendar(identifier: .gregorian).dateInterval(of: .month, for: .now)?.start ?? .now
     @State private var selectedWorkoutDay: String?
+    // チャットのデモ一式。画面の切り替え・再描画・送信中や確認中の再表示で失わないよう、ここに1度だけ作って持つ。
+    // 中身はデモ専用のmemory storeで、このViewの context（通常・V2検証用ストア）とは無関係
+    @State private var chatDemo: AIWorkoutChatDemoSession.Preparation?
 
     init(storeMode: StoreMode = .v1) { self.storeMode = storeMode }
 
@@ -156,7 +159,7 @@ struct MainView: View {
             .padding(.horizontal, 12)
             Group {
                 if selection == "ホーム" { home }
-                else if selection == "チャットで記録" { unavailableChat }
+                else if selection == "チャットで記録" { chatDemoPane }
                 else if selection == "種目" { exerciseList }
                 else { history }
             }
@@ -273,7 +276,7 @@ struct MainView: View {
                     .frame(maxWidth: .infinity, minHeight: 180)
                 }
 
-                Text("目標・分析・設定・AIチャットは未実装です。")
+                Text("目標・分析・設定は未実装です。AIチャットは外部通信なしのデモのみです。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -294,19 +297,35 @@ struct MainView: View {
         }
     }
 
-    private var unavailableChat: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("チャットで記録")
+    private var chatDemoPane: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("チャットで記録（デモ）")
                 .font(.system(size: 32, weight: .bold, design: .rounded))
-            ContentUnavailableView {
-                Label("AI接続はまだ利用できません", systemImage: "bubble.left.and.bubble.right")
-            } description: {
-                Text("AIへの送信は行われません。接続機能が利用可能になるまで、運動は「記録」から入力してください。")
+                .padding(.horizontal, 28)
+                .padding(.top, 28)
+            switch chatDemo {
+            case let .ready(demo)?:
+                // modelContainer環境もデモのcontainerに差し替え、確認画面を含めて通常の context に触れないようにする
+                AIWorkoutChatView(presentation: demo.presentation, context: demo.context,
+                                  mode: .demo(isV2Route: storeMode == .isolatedV2Experimental))
+                    .modelContainer(demo.container)
+            case let .failed(message)?:
+                ContentUnavailableView {
+                    Label("デモを利用できません", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("chatDemoUnavailable")
+            case nil:
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear {
+            // 初めて開いたときだけ作る。失敗したら固定エラーのままにし、通常ストアには切り替えない
+            if chatDemo == nil { chatDemo = AIWorkoutChatDemoSession.prepare() }
+        }
     }
 
     private var history: some View {
