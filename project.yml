@@ -28,6 +28,8 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Melete
+        # Melete/Assets.xcassets/AppIcon.appiconset をアプリアイコンとして使う
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       configs:
         WindowProbe:
           PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.Melete.UITesting
