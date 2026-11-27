@@ -34,6 +34,7 @@
 		5E48FF962284DB294E535545 /* MetricInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45D9505953694C4931C727E0 /* MetricInput.swift */; };
 		611D7BB3B68B0014EE0AEFD2 /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F8B60E5F37F9AC5147FFDEB /* MainView.swift */; };
 		615B5D36B1DFC68E52EFE024 /* ChatGPTOAuthAttempt.swift in Sources */ = {isa = PBXBuildFile; fileRef = B06D08857D277A936E5A405A /* ChatGPTOAuthAttempt.swift */; };
+		629F1C6F633DB2234FAFF288 /* NIOEmbedded in Frameworks */ = {isa = PBXBuildFile; productRef = 8553D62A07891B42DD4C47A1 /* NIOEmbedded */; };
 		63599F07C66ACFCE9A455DD7 /* ExerciseCreationSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BD6E70EA373E05D06FEA54F /* ExerciseCreationSafetyTests.swift */; };
 		64E94E92FE64F6771CF39630 /* V1V2MigrationScratchCoverageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7317DD9B5B164C0D2A5C42D1 /* V1V2MigrationScratchCoverageTests.swift */; };
 		68033C0AF5E93C4C62A53916 /* WorkoutFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50DC90FD8B6B2A3473447A69 /* WorkoutFlowUITests.swift */; };
@@ -196,6 +197,14 @@
 				5808DA461DFD28A3ABDCBC30 /* NIOCore in Frameworks */,
 				74869D0F06BBB7D93CFF6FEB /* NIOPosix in Frameworks */,
 				E44D87C14C5FEFFF6338E01F /* NIOHTTP1 in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		62EE27FB67CE484EF2FF0493 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				629F1C6F633DB2234FAFF288 /* NIOEmbedded in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -375,6 +384,7 @@
 			buildConfigurationList = 2F8EF37306C30D63D56EBB34 /* Build configuration list for PBXNativeTarget "MeleteTests" */;
 			buildPhases = (
 				B52E03239F024509A19727EA /* Sources */,
+				62EE27FB67CE484EF2FF0493 /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -383,6 +393,7 @@
 			);
 			name = MeleteTests;
 			packageProductDependencies = (
+				8553D62A07891B42DD4C47A1 /* NIOEmbedded */,
 			);
 			productName = MeleteTests;
 			productReference = 060EE2CD5220532F134E4EEA /* MeleteTests.xctest */;
@@ -1077,6 +1088,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 8F13701A0D437BB7810EFA9C /* XCRemoteSwiftPackageReference "swift-nio" */;
 			productName = NIOHTTP1;
+		};
+		8553D62A07891B42DD4C47A1 /* NIOEmbedded */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8F13701A0D437BB7810EFA9C /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOEmbedded;
 		};
 		ED81CD96367BAE31825CDAF2 /* NIOCore */ = {
 			isa = XCSwiftPackageProductDependency;

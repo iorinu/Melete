@@ -1,4 +1,7 @@
 import Darwin
+import NIOCore
+import NIOEmbedded
+import NIOHTTP1
 import XCTest
 @testable import Melete
 
@@ -8,6 +11,57 @@ final class ChatGPTOAuthNIORuntimeTests: XCTestCase {
 
     private let syntheticState = "SyntheticNIOLoopbackState-012345678901234567890123456789"
     private var listeners: [Listener] = []
+
+    func testInputClosedWhileCallbackResponseWriteIsPendingKeepsChannelActive() throws {
+        let sinkEntered = DispatchSemaphore(value: 0)
+        let writeCapture = NIOEmbeddedPendingWriteCapture()
+        let port = 43127
+        let harness = Listener.makeEmbeddedCallbackHandler(
+            expectedState: syntheticState,
+            callbackSink: { _ in
+                sinkEntered.signal()
+            },
+            boundPort: port
+        )
+        let channel = EmbeddedChannel(handlers: [writeCapture, harness.handler])
+        defer {
+            writeCapture.markClosing()
+            try? channel.embeddedEventLoop.run()
+            try? channel.close().wait()
+            try? channel.embeddedEventLoop.run()
+            try? harness.shutdown()
+        }
+
+        try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: port)).wait()
+        let head = HTTPRequestHead(
+            version: .http1_1,
+            method: .GET,
+            uri: "/auth/callback?code=synthetic-code&state=\(syntheticState)",
+            headers: ["Host": "127.0.0.1:\(port)"]
+        )
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertEqual(sinkEntered.wait(timeout: .now() + 2), .success, "callback sinkへ到達しなかった")
+        // sink完了イベントを処理し、response writeが未完了promiseで止まるところまで進める。
+        let writeDeadline = ContinuousClock.now + .seconds(2)
+        while writeCapture.promise == nil && ContinuousClock.now < writeDeadline {
+            try channel.embeddedEventLoop.run()
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        guard let pendingPromise = writeCapture.promise else {
+            XCTFail("response write promiseを捕捉できなかった")
+            return
+        }
+        let writeCompletion = NIOTestResultBox<Bool>()
+        pendingPromise.futureResult.whenComplete { _ in writeCompletion.set(.success(true)) }
+        try channel.embeddedEventLoop.run()
+        XCTAssertNil(writeCompletion.result, "捕捉したresponse write promiseがすでに完了していた")
+
+        channel.pipeline.fireUserInboundEventTriggered(ChannelEvent.inputClosed)
+        try channel.embeddedEventLoop.run()
+
+        XCTAssertNil(writeCompletion.result, "inputClosedの処理中にresponse write promiseが完了した")
+        XCTAssertTrue(channel.isActive, "write promise未完了中のinputClosedでchannelが閉じた")
+    }
 
     override func tearDown() async throws {
         for listener in listeners {
@@ -125,6 +179,58 @@ final class ChatGPTOAuthNIORuntimeTests: XCTestCase {
         throw NIOTestTimeout()
     }
 }
+
+private final class NIOEmbeddedPendingWriteCapture: ChannelOutboundHandler {
+    typealias OutboundIn = ByteBuffer
+
+    private enum State {
+        case awaiting
+        case completing
+        case completed
+    }
+
+    private(set) var promise: EventLoopPromise<Void>?
+    private var state: State = .awaiting
+    private var eventLoop: (any EventLoop)?
+    private var closing = false
+    private let cleanupError = NIOEmbeddedPendingWriteCleanupError()
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        eventLoop = context.eventLoop
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        precondition(context.eventLoop.inEventLoop, "captureはembedded eventLoop上でのみ使用する")
+        guard let promise else { context.write(data, promise: nil); return }
+        if closing {
+            promise.fail(cleanupError)
+            return
+        }
+        guard self.promise == nil else {
+            context.write(data, promise: promise)
+            return
+        }
+        self.promise = promise
+        state = .awaiting
+        promise.futureResult.whenComplete { [weak self] _ in
+            guard let self else { return }
+            precondition(self.eventLoop?.inEventLoop == true, "promise状態はembedded eventLoop上でのみ変更する")
+            self.state = .completed
+        }
+        // 意図的にforwardもpromise完了もしない。responseの送信完了待ち状態を保つ。
+    }
+
+    func markClosing() {
+        guard let eventLoop else { preconditionFailure("handler追加前にcleanupされた") }
+        precondition(eventLoop.inEventLoop, "captureはembedded eventLoop上でのみ使用する")
+        closing = true
+        guard state == .awaiting, let promise else { return }
+        state = .completing
+        promise.fail(cleanupError)
+    }
+}
+
+private struct NIOEmbeddedPendingWriteCleanupError: Error {}
 
 private struct NIOTestTimeout: Error {}
 

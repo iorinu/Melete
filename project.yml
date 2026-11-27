@@ -62,6 +62,8 @@ targets:
       - path: TestsShared/ScratchEvidencePolicy.swift
     dependencies:
       - target: Melete
+      - package: SwiftNIO
+        product: NIOEmbedded
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: jp.iorinu.MeleteTests

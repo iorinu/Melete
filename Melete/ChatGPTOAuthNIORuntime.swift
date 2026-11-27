@@ -41,6 +41,25 @@ final class ChatGPTOAuthNIOLoopbackListener: Sendable {
     static let maxHeaderCount = 32
     static let maxHeaderNameLength = 64
 
+#if DEBUG
+    // EmbeddedChannelから本物のcallback handler経路だけを検証するためのテスト専用factory。
+    static func makeEmbeddedCallbackHandler(
+        expectedState: String,
+        callbackSink: @escaping CallbackSink,
+        boundPort: Int
+    ) -> ChatGPTOAuthNIOEmbeddedHarness {
+        let runtime = NIOLoopbackRuntime(expectedState: expectedState, callbackSink: callbackSink)
+        return ChatGPTOAuthNIOEmbeddedHarness(
+            handler: NIOCallbackRequestHandler(
+                runtime: runtime,
+                connection: NIOConnectionState(),
+                boundPort: boundPort
+            ),
+            shutdownRuntime: { try runtime.shutdownForEmbeddedTest() }
+        )
+    }
+#endif
+
     private let lifecycle: NIOLoopbackLifecycle
 
     init(expectedState: String, callbackSink: @escaping CallbackSink) {
@@ -79,12 +98,29 @@ final class ChatGPTOAuthNIOLoopbackListener: Sendable {
 
     /// 受付を止め、全接続を閉じて、event loop groupのshutdown完了まで待つ。
     /// 開始していないときは、以後startできないようにして戻る。停止済み・停止中・bind中のときは、その後始末の完了まで待つ。
-    /// 既に実行中のsinkは待たない（stop開始後に新しくsinkを呼ぶことはない）。
+    /// 既に実行中のsinkは待たない。sink配送はlock下で認可または取消されるが、認可済み配送のsink本体はstop後に開始しうる。
+    /// sinkがstop後に副作用を起こさない必要がある場合は、consumer側で状態を検証すること。
     func stop() async {
         guard let runtime = lifecycle.stop() else { return }
         await runtime.waitUntilFinished()
     }
 }
+
+#if DEBUG
+final class ChatGPTOAuthNIOEmbeddedHarness {
+    let handler: ChannelHandler
+    private let shutdownRuntime: () throws -> Void
+
+    fileprivate init(handler: ChannelHandler, shutdownRuntime: @escaping () throws -> Void) {
+        self.handler = handler
+        self.shutdownRuntime = shutdownRuntime
+    }
+
+    func shutdown() throws {
+        try shutdownRuntime()
+    }
+}
+#endif
 
 // MARK: - 開始・停止の状態
 
@@ -211,7 +247,7 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
     // stop開始時に手放す（nilにする）。以後の接続はこれらを読めず、新しい配送も始めない
     private var callbackSink: ChatGPTOAuthNIOLoopbackListener.CallbackSink?
     private var expectedState: String?
-    // 始めた配送。stop開始時に取消し、起動待ちのsinkを始めさせず、完了通知も止める
+    // pending配送。stopとの競合はdeliveryのlock下でauthorizedまたはcancelledに一度だけ遷移する
     private var delivery: NIOSinkDelivery?
     // 処理中の接続。stopで全部閉じる。channelが閉じたら取り除く
     private var children: [ObjectIdentifier: Channel] = [:]
@@ -225,6 +261,12 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
         self.expectedState = expectedState
         self.callbackSink = callbackSink
     }
+
+#if DEBUG
+    fileprivate func shutdownForEmbeddedTest() throws {
+        try group.syncShutdownGracefully()
+    }
+#endif
 
     var isStopping: Bool {
         lock.lock()
@@ -459,19 +501,27 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
 // sinkが戻ったことを、接続のpipelineへ知らせるevent
 private struct NIOSinkCompletedEvent: Sendable {}
 
-// 1回の配送（sinkの呼び出し）の状態。event loopの外の専用Threadでsinkを呼ぶ。
+// 1回の配送。pendingからauthorized/cancelledへの遷移をlockで線形化し、event loop外の専用Threadでsinkを呼ぶ。
 // Threadはこのobjectとsink・callback・channelだけを持ち、runtime（group）は持たないので、
-// sinkがblockしてもstop（groupのshutdown）は妨げない。ここ自体には秘密を持たせない
+// sinkがblockしてもstop（groupのshutdown）は妨げない。authorized後はstop後にsink本体が始まりうるため、
+// stop後の副作用を防ぐ必要があるconsumerは自身の状態を検証する。ここ自体には秘密を持たせない
 private final class NIOSinkDelivery: @unchecked Sendable {
+    private enum State {
+        case pending
+        case authorized
+        case cancelled
+    }
+
     private let lock = NSLock()
-    private var cancelled = false
+    private var state: State = .pending
+    private var completionSuppressed = false
 
     func start(_ sink: @escaping ChatGPTOAuthNIOLoopbackListener.CallbackSink,
                with callback: ChatGPTOAuthLoopbackCallbackRequest,
                channel: Channel) {
         let thread = Thread { [self] in
-            // Threadが動き出す前にstopが始まっていたらsinkは呼ばない
-            guard isActive else { return }
+            // stopと競合する認可をlock下で決める。認可後のsink開始自体はstop後になりうる
+            guard authorize() else { return }
             sink(callback)
             notifyCompleted(channel)
         }
@@ -479,17 +529,20 @@ private final class NIOSinkDelivery: @unchecked Sendable {
         thread.start()
     }
 
-    // stopから呼ぶ。以後sinkを始めさせず、完了通知も送らない（実行中のsinkは止めない）
+    // stopから呼ぶ。未認可配送を取り消し、完了通知も止める（認可済み/実行中のsinkは止めない）
     func cancel() {
         lock.lock()
         defer { lock.unlock() }
-        cancelled = true
+        if case .pending = state { state = .cancelled }
+        completionSuppressed = true
     }
 
-    private var isActive: Bool {
+    private func authorize() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return !cancelled
+        guard case .pending = state else { return false }
+        state = .authorized
+        return true
     }
 
     // 通知はcancelと同じlockの中で依頼する。stopはcancelしてからgroupのshutdownを始めるので、
@@ -497,7 +550,7 @@ private final class NIOSinkDelivery: @unchecked Sendable {
     private func notifyCompleted(_ channel: Channel) {
         lock.lock()
         defer { lock.unlock() }
-        guard !cancelled else { return }
+        guard !completionSuppressed else { return }
         channel.pipeline.fireUserInboundEventTriggered(NIOSinkCompletedEvent())
     }
 }
@@ -567,12 +620,17 @@ private final class NIOCallbackRequestHandler: ChannelInboundHandler {
         case awaitingSink
         // responseを書いた、または書かずに閉じると決めた
         case finished
+        // response writeの完了を待っている。inputClosedを受けてもwrite完了までは閉じない
+        case writingResponse
+        // response writeが成功し、送信側を閉じた
+        case responseWritten
     }
 
     private let runtime: NIOLoopbackRuntime
     private let connection: NIOConnectionState
     private let boundPort: Int
     private var phase: Phase = .awaitingHead
+    private var inputClosed = false
 
     init(runtime: NIOLoopbackRuntime, connection: NIOConnectionState, boundPort: Int) {
         self.runtime = runtime
@@ -617,8 +675,9 @@ private final class NIOCallbackRequestHandler: ChannelInboundHandler {
             }
             respond(.callbackReceived, context: context)
         case let channelEvent as ChannelEvent where channelEvent == .inputClosed:
-            // response後に相手が閉じたら、こちらも閉じる。sink待ちの間は書き込みのため保つ（期限で必ず閉じる）
-            if case .finished = phase {
+            // inputClosedは記録し、response write中はchannelを維持する。期限は独立して接続を閉じる
+            inputClosed = true
+            if case .responseWritten = phase {
                 context.close(promise: nil)
             }
         default:
@@ -673,7 +732,7 @@ private final class NIOCallbackRequestHandler: ChannelInboundHandler {
     // 固定responseを書き、書けたら送信側だけ閉じる（FIN）。
     // 受信側を読み残したまま全体を閉じるとRSTになりresponseが捨てられうるため、相手が閉じる（inputClosed）か期限まで待つ
     private func respond(_ kind: ChatGPTOAuthLoopbackResponseKind, context: ChannelHandlerContext) {
-        phase = .finished
+        phase = .writingResponse
         guard let data = try? ChatGPTOAuthLoopbackResponseBuilder.response(for: kind) else {
             context.close(promise: nil)
             return
@@ -682,13 +741,23 @@ private final class NIOCallbackRequestHandler: ChannelInboundHandler {
         // closureにはSendableなchannelだけを渡す（contextはevent loopの外へ持ち出さない）
         let channel = context.channel
         context.writeAndFlush(wrapOutboundOut(buffer)).whenComplete { result in
-            switch result {
-            case .success:
-                channel.close(mode: .output).whenFailure { _ in
+            channel.eventLoop.execute {
+                switch result {
+                case .success:
+                    self.phase = .responseWritten
+                    channel.close(mode: .output).whenComplete { closeResult in
+                        channel.eventLoop.execute {
+                            if case .failure = closeResult {
+                                channel.close(promise: nil)
+                            } else if self.inputClosed {
+                                channel.close(promise: nil)
+                            }
+                        }
+                    }
+                case .failure:
+                    self.phase = .finished
                     channel.close(promise: nil)
                 }
-            case .failure:
-                channel.close(promise: nil)
             }
         }
     }
