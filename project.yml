@@ -24,6 +24,10 @@ packages:
   JOSESwift:
     url: https://github.com/airsidemobile/JOSESwift
     exactVersion: 3.0.0
+  # ネットワーク基盤ライブラリ。承認済みの2.105.0に完全固定する
+  SwiftNIO:
+    url: https://github.com/apple/swift-nio.git
+    exactVersion: 2.105.0
 targets:
   Melete:
     type: application
@@ -32,6 +36,13 @@ targets:
       - path: Melete
     dependencies:
       - package: JOSESwift
+      # SwiftNIOは複数productを持つため、使うproductを個別に指定する
+      - package: SwiftNIO
+        product: NIOCore
+      - package: SwiftNIO
+        product: NIOPosix
+      - package: SwiftNIO
+        product: NIOHTTP1
     settings:
       base:
         PRODUCT_NAME: Melete
