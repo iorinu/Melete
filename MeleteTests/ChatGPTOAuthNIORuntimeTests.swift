@@ -12,6 +12,7 @@ final class ChatGPTOAuthNIORuntimeTests: XCTestCase {
     private let syntheticState = "SyntheticNIOLoopbackState-012345678901234567890123456789"
     private var listeners: [Listener] = []
 
+    #if DEBUG
     func testInputClosedWhileCallbackResponseWriteIsPendingKeepsChannelActive() throws {
         let sinkEntered = DispatchSemaphore(value: 0)
         let writeCapture = NIOEmbeddedPendingWriteCapture()
@@ -62,6 +63,7 @@ final class ChatGPTOAuthNIORuntimeTests: XCTestCase {
         XCTAssertNil(writeCompletion.result, "inputClosedの処理中にresponse write promiseが完了した")
         XCTAssertTrue(channel.isActive, "write promise未完了中のinputClosedでchannelが閉じた")
     }
+    #endif
 
     override func tearDown() async throws {
         for listener in listeners {
@@ -96,6 +98,68 @@ final class ChatGPTOAuthNIORuntimeTests: XCTestCase {
         let acceptsAfterStop = await NIOTestSocket.connectAndClose(port: port)
         XCTAssertFalse(acceptsAfterStop, "stop完了後も接続を受け付けた")
         XCTAssertTrue(recorder.callbacks == [expectedCallback], "stop後にsinkへ追加配送された")
+    }
+
+    #if DEBUG
+    func testServerPipelineErrorNotifiesOnceAndStopsListener() async throws {
+        let failures = NIORuntimeFailureRecorder()
+        let listener = Listener(expectedState: syntheticState, callbackSink: { _ in }, failureHandler: { failure in
+            failures.record(failure)
+        })
+        listeners.append(listener)
+        let port = try await withTimeout("failure handler start") { try await listener.start() }
+
+        listener.injectSyntheticServerErrorForTesting()
+        listener.injectSyntheticServerErrorForTesting()
+        let received = await NIOTestSocket.waitForSignal(failures.signal)
+        XCTAssertTrue(received, "server pipeline errorのfailure通知が届かなかった")
+        XCTAssertEqual(failures.failures.count, 1, "failure通知がちょうど1回ではなかった")
+        try await withTimeout("failure handler stop") { await listener.stop() }
+        let refused = await NIOTestSocket.connectionIsRefused(port: port)
+        XCTAssertTrue(refused, "failure後にserver channelが閉じなかった")
+    }
+
+    func testServerErrorDuringBindFailsStartAndClosesBoundPort() async throws {
+        let observedPort = NIOTestResultBox<Int>()
+        let failures = NIORuntimeFailureRecorder()
+        let listener = Listener(expectedState: syntheticState, callbackSink: { _ in }, failureHandler: { failure in
+            failures.record(failure)
+        })
+        listener.setDebugHook(.init(injectSyntheticServerError: true) { port in
+                observedPort.set(.success(port))
+            })
+        listeners.append(listener)
+
+        do {
+            _ = try await withTimeout("bind error start") { try await listener.start() }
+            XCTFail("bind中に発生したserver pipeline errorでstartが失敗しなかった")
+        } catch is NIOTestTimeout {
+            throw NIOTestTimeout()
+        } catch {
+            XCTAssertEqual(error as? ChatGPTOAuthLoopbackListenerError, .setupFailed,
+                           "bind中のserver pipeline errorがsetupFailedではなかった")
+        }
+
+        guard let portResult = observedPort.result,
+              let port = try? portResult.get() else {
+            XCTFail("検証用observerがbind済みportを受け取らなかった")
+            return
+        }
+        let refused = await NIOTestSocket.connectionIsRefused(port: port)
+        XCTAssertTrue(refused, "start失敗後にserver channelのportが接続拒否にならなかった")
+        XCTAssertTrue(failures.failures.isEmpty, "bind中の失敗でfailureHandler通知が発生した")
+    }
+    #endif
+
+    func testNormalStopDoesNotNotifyFailureHandler() async throws {
+        let failures = NIORuntimeFailureRecorder()
+        let listener = Listener(expectedState: syntheticState, callbackSink: { _ in }, failureHandler: { failure in
+            failures.record(failure)
+        })
+        listeners.append(listener)
+        _ = try await withTimeout("normal stop start") { try await listener.start() }
+        try await withTimeout("normal stop") { await listener.stop() }
+        XCTAssertTrue(failures.failures.isEmpty, "通常stopでfailure通知が発生した")
     }
 
     func testClientWriteHalfCloseStillReceivesCompleteCallbackResponse() async throws {
@@ -148,9 +212,16 @@ final class ChatGPTOAuthNIORuntimeTests: XCTestCase {
         let stopReturnedBeforeRelease = await NIOTestSocket.waitForResult(stopResult)
         XCTAssertTrue(stopReturnedBeforeRelease, "sink解放前にstopが戻らなかった")
 
+        if !stopReturnedBeforeRelease {
+            stopTask.cancel()
+        }
         releaseSink.signal()
         _ = await clientTask.value
-        await stopTask.value
+        let stopTaskRecovered = await NIOTestSocket.waitForResult(stopResult)
+        if !stopTaskRecovered {
+            // cancel後もstopが回収できない場合、Taskが保持するOSリソースの解放は保証できない。
+            XCTFail("明示cancel後もstop taskが期限内に終了せず、回収できなかった")
+        }
     }
 
     private func request(path: String, port: Int) -> Data {
@@ -262,6 +333,25 @@ private final class NIORuntimeCallbackRecorder: @unchecked Sendable {
     }
 
     var callbacks: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
+private final class NIORuntimeFailureRecorder: @unchecked Sendable {
+    let signal = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var stored: [ChatGPTOAuthNIOLoopbackListener.ChatGPTOAuthNIORuntimeFailure] = []
+
+    func record(_ failure: ChatGPTOAuthNIOLoopbackListener.ChatGPTOAuthNIORuntimeFailure) {
+        lock.lock()
+        stored.append(failure)
+        lock.unlock()
+        signal.signal()
+    }
+
+    var failures: [ChatGPTOAuthNIOLoopbackListener.ChatGPTOAuthNIORuntimeFailure] {
         lock.lock()
         defer { lock.unlock() }
         return stored

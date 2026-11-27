@@ -27,9 +27,10 @@ import NIOPosix
 //   既に実行中のsinkは強制終了できないため待たない（既存listenerと同じ契約）
 // - 二重start・stop後のstart・start中のcancellationはすべて失敗させ、同じlistenerを再利用しない（fail closed）
 // - request target・header・callbackの内容は、error・description・ログのどこにも含めない（ログは一切出さない）
-final class ChatGPTOAuthNIOLoopbackListener: Sendable {
+final class ChatGPTOAuthNIOLoopbackListener: @unchecked Sendable {
     // 既存listenerと同じ形のsinkを受け取る（後で差し替えやすくするため）
     typealias CallbackSink = ChatGPTOAuthLoopbackListener.CallbackSink
+    typealias FailureHandler = @Sendable (ChatGPTOAuthNIOLoopbackListener.ChatGPTOAuthNIORuntimeFailure) -> Void
 
     // 同時に処理する接続の上限
     static let maxConnections = 4
@@ -41,14 +42,23 @@ final class ChatGPTOAuthNIOLoopbackListener: Sendable {
     static let maxHeaderCount = 32
     static let maxHeaderNameLength = 64
 
+    enum ChatGPTOAuthNIORuntimeFailure: Equatable, Sendable {
+        case listenerFailed
+    }
+
 #if DEBUG
+    struct BindFailureTestHook {
+        let injectSyntheticServerError: Bool
+        let observeBoundPort: @Sendable (Int) -> Void
+    }
+
     // EmbeddedChannelから本物のcallback handler経路だけを検証するためのテスト専用factory。
     static func makeEmbeddedCallbackHandler(
         expectedState: String,
         callbackSink: @escaping CallbackSink,
         boundPort: Int
     ) -> ChatGPTOAuthNIOEmbeddedHarness {
-        let runtime = NIOLoopbackRuntime(expectedState: expectedState, callbackSink: callbackSink)
+        let runtime = NIOLoopbackRuntime(expectedState: expectedState, callbackSink: callbackSink, failureHandler: nil)
         return ChatGPTOAuthNIOEmbeddedHarness(
             handler: NIOCallbackRequestHandler(
                 runtime: runtime,
@@ -61,10 +71,20 @@ final class ChatGPTOAuthNIOLoopbackListener: Sendable {
 #endif
 
     private let lifecycle: NIOLoopbackLifecycle
+#if DEBUG
+    private var debugHook: BindFailureTestHook?
+#endif
 
-    init(expectedState: String, callbackSink: @escaping CallbackSink) {
-        lifecycle = NIOLoopbackLifecycle(expectedState: expectedState, callbackSink: callbackSink)
+    init(expectedState: String, callbackSink: @escaping CallbackSink, failureHandler: FailureHandler? = nil) {
+        lifecycle = NIOLoopbackLifecycle(expectedState: expectedState, callbackSink: callbackSink, failureHandler: failureHandler)
     }
+
+#if DEBUG
+    func setDebugHook(_ hook: BindFailureTestHook?) {
+        debugHook = hook
+        lifecycle.setDebugHook(hook)
+    }
+#endif
 
     deinit {
         // stopされずに解放された場合も、受付を止めてgroupのshutdownを始める（終了は待てない）
@@ -104,9 +124,17 @@ final class ChatGPTOAuthNIOLoopbackListener: Sendable {
         guard let runtime = lifecycle.stop() else { return }
         await runtime.waitUntilFinished()
     }
+
+#if DEBUG
+    func injectSyntheticServerErrorForTesting() {
+        lifecycle.injectSyntheticServerErrorForTesting()
+    }
+#endif
 }
 
 #if DEBUG
+private struct ChatGPTOAuthNIOSyntheticServerError: Error {}
+
 final class ChatGPTOAuthNIOEmbeddedHarness {
     let handler: ChannelHandler
     private let shutdownRuntime: () throws -> Void
@@ -128,7 +156,8 @@ final class ChatGPTOAuthNIOEmbeddedHarness {
 private final class NIOLoopbackLifecycle: @unchecked Sendable {
     private enum State {
         // start前だけexpectedStateとsinkを持つ。start後はruntimeへ渡し、ここでは持たない
-        case idle(expectedState: String, callbackSink: ChatGPTOAuthNIOLoopbackListener.CallbackSink)
+        case idle(expectedState: String, callbackSink: ChatGPTOAuthNIOLoopbackListener.CallbackSink,
+                  failureHandler: ChatGPTOAuthNIOLoopbackListener.FailureHandler?)
         // bindを待っている
         case starting(NIOLoopbackRuntime)
         case running(NIOLoopbackRuntime)
@@ -138,10 +167,23 @@ private final class NIOLoopbackLifecycle: @unchecked Sendable {
 
     private let lock = NSLock()
     private var state: State
+#if DEBUG
+    private var debugHook: ChatGPTOAuthNIOLoopbackListener.BindFailureTestHook?
+#endif
 
-    init(expectedState: String, callbackSink: @escaping ChatGPTOAuthNIOLoopbackListener.CallbackSink) {
-        state = .idle(expectedState: expectedState, callbackSink: callbackSink)
+    init(expectedState: String, callbackSink: @escaping ChatGPTOAuthNIOLoopbackListener.CallbackSink,
+         failureHandler: ChatGPTOAuthNIOLoopbackListener.FailureHandler?) {
+        state = .idle(expectedState: expectedState, callbackSink: callbackSink, failureHandler: failureHandler)
     }
+
+#if DEBUG
+    func setDebugHook(_ hook: ChatGPTOAuthNIOLoopbackListener.BindFailureTestHook?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .idle = state else { return }
+        debugHook = hook
+    }
+#endif
 
     // idle → starting。groupとruntimeを作るだけで、bindはlockの外（呼び出し側のawait）で行う
     func beginStart() throws -> NIOLoopbackRuntime {
@@ -150,10 +192,12 @@ private final class NIOLoopbackLifecycle: @unchecked Sendable {
 
         let expectedState: String
         let callbackSink: ChatGPTOAuthNIOLoopbackListener.CallbackSink
+        let failureHandler: ChatGPTOAuthNIOLoopbackListener.FailureHandler?
         switch state {
-        case .idle(let pendingState, let pendingSink):
+        case .idle(let pendingState, let pendingSink, let pendingFailureHandler):
             expectedState = pendingState
             callbackSink = pendingSink
+            failureHandler = pendingFailureHandler
         case .starting, .running:
             throw ChatGPTOAuthLoopbackListenerError.alreadyStarted
         case .stopped:
@@ -164,7 +208,10 @@ private final class NIOLoopbackLifecycle: @unchecked Sendable {
             state = .stopped(nil)
             throw CancellationError()
         }
-        let runtime = NIOLoopbackRuntime(expectedState: expectedState, callbackSink: callbackSink)
+        let runtime = NIOLoopbackRuntime(expectedState: expectedState, callbackSink: callbackSink, failureHandler: failureHandler)
+#if DEBUG
+        runtime.setDebugHook(debugHook)
+#endif
         state = .starting(runtime)
         return runtime
     }
@@ -220,6 +267,16 @@ private final class NIOLoopbackLifecycle: @unchecked Sendable {
             break
         }
     }
+
+#if DEBUG
+    func injectSyntheticServerErrorForTesting() {
+        lock.lock()
+        let runtime: NIOLoopbackRuntime?
+        if case .running(let current) = state { runtime = current } else { runtime = nil }
+        lock.unlock()
+        runtime?.injectSyntheticServerErrorForTesting()
+    }
+#endif
 }
 
 // MARK: - groupとserver channel
@@ -246,6 +303,10 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
     private var delivered = false
     // stop開始時に手放す（nilにする）。以後の接続はこれらを読めず、新しい配送も始めない
     private var callbackSink: ChatGPTOAuthNIOLoopbackListener.CallbackSink?
+    private var failureHandler: ChatGPTOAuthNIOLoopbackListener.FailureHandler?
+#if DEBUG
+    private var debugHook: ChatGPTOAuthNIOLoopbackListener.BindFailureTestHook?
+#endif
     private var expectedState: String?
     // pending配送。stopとの競合はdeliveryのlock下でauthorizedまたはcancelledに一度だけ遷移する
     private var delivery: NIOSinkDelivery?
@@ -253,16 +314,26 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
     private var children: [ObjectIdentifier: Channel] = [:]
     // groupのshutdown完了を待っている呼び出し
     private var finished = false
+    // binding中のserver pipeline errorをstartへ固定setupFailedで伝える
+    private var bindingFailure = false
     private var finishWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(expectedState: String, callbackSink: @escaping ChatGPTOAuthNIOLoopbackListener.CallbackSink) {
+    init(expectedState: String, callbackSink: @escaping ChatGPTOAuthNIOLoopbackListener.CallbackSink,
+         failureHandler: ChatGPTOAuthNIOLoopbackListener.FailureHandler?) {
         // 1 threadで足りる（接続は最大4、1接続のrequestは1個だけ）
         group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         self.expectedState = expectedState
         self.callbackSink = callbackSink
+        self.failureHandler = failureHandler
     }
 
 #if DEBUG
+    func setDebugHook(_ hook: ChatGPTOAuthNIOLoopbackListener.BindFailureTestHook?) {
+        lock.lock()
+        defer { lock.unlock() }
+        debugHook = hook
+    }
+
     fileprivate func shutdownForEmbeddedTest() throws {
         try group.syncShutdownGracefully()
     }
@@ -274,6 +345,17 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
         return stopping
     }
 
+#if DEBUG
+    func injectSyntheticServerErrorForTesting() {
+        lock.lock()
+        guard case .serving(let channel) = phase else { lock.unlock(); return }
+        lock.unlock()
+        channel.eventLoop.execute {
+            channel.pipeline.fireErrorCaught(ChatGPTOAuthNIOSyntheticServerError())
+        }
+    }
+#endif
+
     // MARK: bind
 
     /// 127.0.0.1:0 へbindし、確定したportを返す。
@@ -284,6 +366,10 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
             .serverChannelOption(ChannelOptions.backlog, value: Int32(ChatGPTOAuthNIOLoopbackListener.maxConnections))
             // 相手が送信側だけ閉じても、こちらはresponseを書き終えるまで接続を保てるようにする
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+            .serverChannelInitializer { [weak self] channel in
+                guard let self else { return channel.eventLoop.makeSucceededVoidFuture() }
+                return channel.pipeline.addHandler(NIOServerFailureHandler(runtime: self))
+            }
             .childChannelInitializer { [self] channel in
                 initializeChild(channel)
             }
@@ -306,8 +392,22 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
             throw ChatGPTOAuthLoopbackListenerError.setupFailed
         }
 
+#if DEBUG
+        if let debugHook {
+            debugHook.observeBoundPort(bound.port)
+            if debugHook.injectSyntheticServerError {
+                try await serverChannel.eventLoop.submit {
+                    serverChannel.pipeline.syncOperations.fireErrorCaught(ChatGPTOAuthNIOSyntheticServerError())
+                }.get()
+            }
+        }
+#endif
+
         guard attach(serverChannel) else {
-            // bind中にstop・取消された。attachが後始末を始めている
+            // attach拒否の時点で、bind error・stop・取消の勝敗はruntime lockで確定している
+            if hasBindingFailure {
+                throw ChatGPTOAuthLoopbackListenerError.setupFailed
+            }
             if Task.isCancelled { throw CancellationError() }
             throw ChatGPTOAuthLoopbackListenerError.stopped
         }
@@ -325,6 +425,12 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
         phase = .serving(serverChannel)
         lock.unlock()
         return true
+    }
+
+    private var hasBindingFailure: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return bindingFailure
     }
 
     // MARK: 停止
@@ -361,6 +467,7 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
         delivery?.cancel()
         callbackSink = nil
         expectedState = nil
+        failureHandler = nil
         let openChildren = Array(children.values)
         children.removeAll()
         lock.unlock()
@@ -373,6 +480,45 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
         // shutdownは残っているchannelもすべて閉じ、event loopのthreadが終わってから完了を知らせる
         group.shutdownGracefully(queue: .global()) { [self] _ in
             markFinished()
+        }
+    }
+
+    // listener failureとstopの勝敗をruntime lock内で決める。
+    // 利用者closureはevent loop・lock・stopの呼び出し元で実行せず、専用Threadへ渡す。
+    fileprivate func serverPipelineFailed() {
+        lock.lock()
+        guard !stopping else {
+            lock.unlock()
+            return
+        }
+        if case .binding = phase {
+            // errorCaughtとattachは同じlockで順序づけ、成功したbind channelもattachさせない。
+            // このlockを先に取った側が優先。stop/cancellationが先ならerrorは無視し、errorが先ならstartはsetupFailed。
+            bindingFailure = true
+            stopping = true
+            delivery?.cancel()
+            callbackSink = nil
+            expectedState = nil
+            lock.unlock()
+            return
+        }
+        guard case .serving(let serverChannel) = phase else {
+            lock.unlock()
+            return
+        }
+        stopping = true
+        delivery?.cancel()
+        callbackSink = nil
+        expectedState = nil
+        let handler = failureHandler
+        failureHandler = nil
+        lock.unlock()
+
+        beginTeardownIfNeeded(serverChannel: serverChannel)
+        if let handler {
+            Thread {
+                handler(.listenerFailed)
+            }.start()
         }
     }
 
@@ -493,6 +639,24 @@ private final class NIOLoopbackRuntime: @unchecked Sendable {
         let newDelivery = NIOSinkDelivery()
         delivery = newDelivery
         return .deliver(newDelivery, sink)
+    }
+}
+
+// server pipelineで観測したerrorを、内容を捨てて固定failureとしてruntimeへ渡す。
+// errorには子channel initializer failureも含まれうるため、accept failureだけとは断定しない。
+private final class NIOServerFailureHandler: ChannelInboundHandler {
+    typealias InboundIn = Any
+
+    private weak var runtime: NIOLoopbackRuntime?
+
+    init(runtime: NIOLoopbackRuntime) {
+        self.runtime = runtime
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        _ = error // 内容・description・URI等を観測・記録しない
+        runtime?.serverPipelineFailed()
+        context.close(promise: nil)
     }
 }
 

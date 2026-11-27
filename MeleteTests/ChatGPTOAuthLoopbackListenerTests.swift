@@ -143,6 +143,46 @@ final class ChatGPTOAuthLoopbackListenerTests: XCTestCase {
         XCTAssertEqual(recorder.callbacks.count, 1)
     }
 
+    // 1接続1要求の契約: 完全なrequest head（Content-Length・Transfer-Encoding無しのGET）の直後に
+    // 余剰の第2 requestが同じwriteで届いても、最初のrequestだけをちょうど1回配送し、第2 requestは処理しない。
+    // 余剰データがTCPのどのread境界で届くかに左右されず、最初のhead終端までを1件のrequestとして扱うことを確かめる
+    func testPipelinedSecondRequestInSameWriteIsIgnoredAndFirstIsDeliveredOnce() async throws {
+        let recorder = CallbackRecorder()
+        let listener = makeListener(recorder)
+        let port = try await start(listener)
+
+        // どちらも正しいHost・stateを持つ。codeだけを変え、配送されたのがどちらのrequestかを区別できるようにする
+        let firstRequest = callbackRequest(path: "/auth/callback?code=synthetic-code-0001&state=\(syntheticState)", port: port)
+        let secondRequest = callbackRequest(path: "/auth/callback?code=synthetic-code-0002&state=\(syntheticState)", port: port)
+        let expectedCallback = try ChatGPTOAuthLoopbackHTTPRequestParser.parse(firstRequest, boundPort: port).callback
+        let secondCallback = try ChatGPTOAuthLoopbackHTTPRequestParser.parse(secondRequest, boundPort: port).callback
+        XCTAssertNotEqual(expectedCallback, secondCallback, "2つのrequestを区別できず、どちらが配送されたか確かめられない")
+
+        // 送信前に2つを連結しておき、exchangeの1回のsendAllでまとめて送る
+        var pipelined = firstRequest
+        pipelined.append(secondRequest)
+
+        let outcome = await exchange(port: port, request: pipelined)
+        let received = try ChatGPTOAuthLoopbackResponseBuilder.response(for: .callbackReceived)
+        // 受け取ったバイト列が固定のcallbackReceived 1件とちょうど一致すること（第2 requestへのresponseが続いていないこと）を確かめる。
+        // 閉じ方（FIN・RST）は、listenerが未読の余剰データをどう扱うかで変わりうるため問わない
+        switch outcome {
+        case .closed(let data), .reset(let data):
+            XCTAssertEqual(data, received, "最初のrequestへの固定のcallbackReceived responseだけを返していない")
+        case .timedOut, .tooLarge, .failed:
+            XCTFail("最初のrequestへのresponseを返して接続を閉じていない")
+        }
+
+        // sinkはresponseの書き込みより前に呼ばれる契約なので、この時点で最初のrequestのcallbackだけが届いている
+        XCTAssertEqual(recorder.callbacks, [expectedCallback], "最初のrequestのcallbackがちょうど1回配送されていない")
+
+        // 第2 requestが後から処理されて配送されないことを、少し待ってからも確かめる
+        try await Task.sleep(for: .milliseconds(200))
+        try await stop(listener)
+        await assertNotAccepting(port: port)
+        XCTAssertEqual(recorder.callbacks, [expectedCallback], "余剰の第2 requestが処理された")
+    }
+
     // MARK: - negative
 
     // callback path以外（/favicon.ico）はsinkへ渡さず、固定の404を返す
@@ -223,12 +263,76 @@ final class ChatGPTOAuthLoopbackListenerTests: XCTestCase {
         await assertNotAccepting(port: port)
     }
 
+    // sinkがblockしたままでも、同時に呼んだ複数のstopは実行中のsinkを待たずに戻る。
+    // sink実行中の重複callbackは配送されず、stop後は新しい配送も受付もない。
+    // sinkを解放すると戻り、sinkのclosureが捕まえていたものも手放される
+    func testStopReturnsWhileSinkIsBlockedAndReleasesSinkAfterItReturns() async throws {
+        let gate = BlockingSinkGate()
+        // 途中で失敗しても、配送用Threadをblockさせたまま残さない
+        defer { gate.release() }
+        let (listener, captureProbe) = makeBlockingListener(gate)
+        let port = try await start(listener)
+
+        // sinkが戻るまでresponseは返らないので、完了を待たずに進める
+        async let blockedOutcome = exchange(port: port, request: callbackRequest(path: "/auth/callback?\(syntheticQuery)", port: port))
+        let entered = await waitWithin(seconds: 5) { gate.enteredCount == 1 }
+        XCTAssertTrue(entered, "正当なcallbackでsinkが呼ばれない")
+
+        // sink実行中に届いた正当なcallbackは、配送枠を使い切っているので配送しない
+        let duplicate = await exchange(port: port, request: callbackRequest(path: "/auth/callback?\(syntheticQuery)", port: port))
+        let failed = try ChatGPTOAuthLoopbackResponseBuilder.response(for: .callbackFailed)
+        XCTAssertEqual(duplicate, .closed(failed), "sink実行中の重複callbackに固定のcallbackFailedを返していない")
+
+        // 2つのstopを同時に呼ぶ。どちらも制限時間内に戻らなければ、runWithinが失敗させる
+        async let firstStop: Void = stop(listener)
+        async let secondStop: Void = stop(listener)
+        try await firstStop
+        try await secondStop
+        XCTAssertEqual(gate.exitedCount, 0, "sinkが解放前に戻っており、stopがsinkを待たないことを確かめられていない")
+
+        // sinkが戻る前にstopしたので、responseを書かずに閉じる
+        let outcome = await blockedOutcome
+        switch outcome {
+        case .closed(let data), .reset(let data):
+            XCTAssertTrue(data.isEmpty, "sink完了前にstopした接続へresponseが書き込まれた")
+        case .timedOut, .tooLarge, .failed:
+            XCTFail("sink完了前にstopした接続が想定どおりに閉じられていない")
+        }
+        await assertNotAccepting(port: port)
+        // 停止済みのlistenerへのstopも、実行中のsinkを待たずに戻る
+        try await stop(listener)
+
+        gate.release()
+        let exited = await waitWithin(seconds: 5) { gate.exitedCount == 1 }
+        XCTAssertTrue(exited, "解放後もsinkが戻らない")
+        // sinkが戻れば配送用Threadが終わり、listener側もstop時にsinkを手放しているので、closureの捕まえたものが解放される
+        let released = await waitWithin(seconds: 5) { captureProbe.isReleased }
+        XCTAssertTrue(released, "sinkが戻った後もsinkのclosureが保持されている")
+
+        // stop後に追加の配送が始まらないこと
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(gate.enteredCount, 1, "stop後に新しい配送が始まった")
+    }
+
     // MARK: - listener操作（制限時間付き）
 
     private func makeListener(_ recorder: CallbackRecorder) -> Listener {
         let listener = Listener(expectedState: syntheticState, callbackSink: { recorder.record($0) })
         createdListeners.append(listener)
         return listener
+    }
+
+    // gateが解放されるまでblockするsinkを持つlistenerを作る。
+    // sinkのclosureだけがtokenを捕まえるので、closureが手放されたかをprobeで確かめられる
+    private func makeBlockingListener(_ gate: BlockingSinkGate) -> (Listener, ReleaseProbe) {
+        let token = SinkCaptureToken()
+        let probe = ReleaseProbe(token)
+        let listener = Listener(expectedState: syntheticState, callbackSink: { _ in
+            // withExtendedLifetimeでtokenをclosureに捕まえさせ、sinkが戻るまで確実に生かしておく
+            withExtendedLifetime(token) { gate.block() }
+        })
+        createdListeners.append(listener)
+        return (listener, probe)
     }
 
     private struct TimedOut: Error {}
@@ -350,6 +454,69 @@ private final class CallbackRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return stored
+    }
+}
+
+// 解放されるまでsinkをblockさせる。sinkは配送用Threadから呼ばれるため、lockで守る
+private final class BlockingSinkGate: @unchecked Sendable {
+    // 解放を忘れても配送用Threadが残り続けないよう、blockする時間にも上限を設ける
+    private static let maxBlockSeconds = 30
+
+    private let lock = NSLock()
+    private let releaseSignal = DispatchSemaphore(value: 0)
+    private var entered = 0
+    private var exited = 0
+    private var released = false
+
+    func block() {
+        lock.lock()
+        entered += 1
+        lock.unlock()
+        _ = releaseSignal.wait(timeout: .now() + .seconds(Self.maxBlockSeconds))
+        lock.lock()
+        exited += 1
+        lock.unlock()
+    }
+
+    // 何回呼んでもよい（defer・明示的な解放の両方から呼ぶ）
+    func release() {
+        lock.lock()
+        let alreadyReleased = released
+        released = true
+        lock.unlock()
+        guard !alreadyReleased else { return }
+        releaseSignal.signal()
+    }
+
+    var enteredCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entered
+    }
+
+    var exitedCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return exited
+    }
+}
+
+// sinkのclosureだけが強参照で捕まえる目印
+private final class SinkCaptureToken: Sendable {}
+
+// tokenを弱参照で見張り、解放されたかを確かめる
+private final class ReleaseProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var token: SinkCaptureToken?
+
+    init(_ token: SinkCaptureToken) {
+        self.token = token
+    }
+
+    var isReleased: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return token == nil
     }
 }
 
