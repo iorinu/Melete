@@ -19,12 +19,19 @@ configs:
   Release: release
   WindowProbe: debug
   ScratchProbe: debug
+packages:
+  # JOSE（JWS/JWE/JWK）ライブラリ。意図しない更新を避けるため3.0.0に完全固定する
+  JOSESwift:
+    url: https://github.com/airsidemobile/JOSESwift
+    exactVersion: 3.0.0
 targets:
   Melete:
     type: application
     platform: macOS
     sources:
       - path: Melete
+    dependencies:
+      - package: JOSESwift
     settings:
       base:
         PRODUCT_NAME: Melete
