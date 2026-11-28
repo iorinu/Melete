@@ -20,6 +20,21 @@ import Foundation
 
 @MainActor
 final class ChatGPTOAuthAttempt {
+    /// state照合済みcallbackから同じ試行内で組み立てたrequestと検証文脈。
+    /// initializerを同一ファイル内に限定し、試行と無関係な場所からの構築を防ぐ。
+    /// JWKS検証など別の認証保証を表すものではない。
+    struct BoundTokenRequest {
+        let tokenRequest: ChatGPTOAuthTokenRequest
+        let expectedNonce: String
+        let callbackClientID: String
+
+        fileprivate init(tokenRequest: ChatGPTOAuthTokenRequest, expectedNonce: String, callbackClientID: String) {
+            self.tokenRequest = tokenRequest
+            self.expectedNonce = expectedNonce
+            self.callbackClientID = callbackClientID
+        }
+    }
+
     // 有効期間の上限（秒）。ブラウザでの操作に十分で、放置された試行が長く残らない長さにする
     static let maxLifetime: TimeInterval = 600
 
@@ -103,6 +118,11 @@ final class ChatGPTOAuthAttempt {
     /// callbackを検証し、合格したときだけtoken exchange requestを1回だけ返す
     /// - Parameter callback: ブラウザから戻ってきたcallback URLの文字列（加工せずそのまま渡す）
     func consumeCallback(_ callback: String) throws -> ChatGPTOAuthTokenRequest {
+        try consumeBoundCallback(callback).tokenRequest
+    }
+
+    /// state照合に成功したcallbackのrequestと文脈を、同じ試行から一度だけ返す。
+    func consumeBoundCallback(_ callback: String) throws -> BoundTokenRequest {
         // 1. すでに終わった試行は、中身を見ずに拒否する
         switch phase {
         case .pending:
@@ -167,7 +187,12 @@ final class ChatGPTOAuthAttempt {
 
         // 5. この試行のredirect URIとverifierだけを使ってtoken requestを組み立てる
         do {
-            return try ChatGPTOAuthTokenRequestBuilder.build(authorization: authorization, callback: result)
+            let request = try ChatGPTOAuthTokenRequestBuilder.build(authorization: authorization, callback: result)
+            return BoundTokenRequest(
+                tokenRequest: request,
+                expectedNonce: authorization.nonce,
+                callbackClientID: result.clientID
+            )
         } catch let error as ChatGPTOAuthTokenRequestError {
             throw ChatGPTOAuthAttemptError.tokenRequestRejected(error)
         } catch {
@@ -182,6 +207,12 @@ final class ChatGPTOAuthAttempt {
             phase = .cancelled
         }
     }
+}
+
+extension ChatGPTOAuthAttempt.BoundTokenRequest: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    nonisolated var description: String { "ChatGPTOAuthAttempt.BoundTokenRequest(<redacted>)" }
+    nonisolated var debugDescription: String { description }
+    nonisolated var customMirror: Mirror { Mirror(self, children: [], displayStyle: .struct) }
 }
 
 // state・nonce・verifierを保持するため、print・dump・デバッガ表示では伏せ字にする

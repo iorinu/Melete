@@ -248,6 +248,36 @@ final class ChatGPTOAuthAttemptTests: XCTestCase {
         assertSameRequest(request, try expectedTokenRequest(), "正しいcallbackから期待どおりのtoken requestを1つ作る")
     }
 
+    func testBoundRequestCarriesNonceAndClientIDFromTheVerifiedAttempt() throws {
+        let clock = MockClock(startDate)
+        let attempt = try makeAttempt(clock: clock)
+        let bound = try attempt.consumeBoundCallback(callbackURL())
+
+        assertSameRequest(bound.tokenRequest, try expectedTokenRequest(), "bound valueのrequestは同じ試行の出力")
+        XCTAssertEqual(bound.expectedNonce, syntheticNonce)
+        XCTAssertEqual(bound.callbackClientID, syntheticClientID)
+        assertRejects(attempt, callbackURL(), as: .alreadyConsumed, "bound value生成後は試行を再利用できない")
+    }
+
+    func testBoundRequestCannotBeProducedAfterCancellation() throws {
+        let attempt = try makeAttempt(clock: MockClock(startDate))
+        attempt.cancel()
+        XCTAssertThrowsError(try attempt.consumeBoundCallback(callbackURL())) { error in
+            XCTAssertEqual(error as? ChatGPTOAuthAttemptError, .cancelled)
+        }
+    }
+
+    func testBoundRequestDescriptionDebugAndReflectionRedactContext() throws {
+        let attempt = try makeAttempt(clock: MockClock(startDate))
+        let bound = try attempt.consumeBoundCallback(callbackURL())
+        let rendered = renderedForms(of: bound)
+        for text in rendered {
+            for secret in secretValues {
+                XCTAssertFalse(text.contains(secret), "bound valueの表示に秘密値が含まれている")
+            }
+        }
+    }
+
     func testValidCallbackJustBeforeExpiryIsAccepted() throws {
         let clock = MockClock(startDate)
         let attempt = try makeAttempt(clock: clock)
