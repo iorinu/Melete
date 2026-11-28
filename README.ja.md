@@ -1,5 +1,7 @@
 # Melete
 
+<img src="docs/prototypes/melete-icon-g1.svg" alt="Melete app icon" width="160">
+
 [English](README.md) | 日本語
 
 Melete は、筋力トレーニングなどの運動を記録する macOS アプリです。種目ごとに記録する数値項目を定義し、日付ごとの運動履歴を振り返れます。

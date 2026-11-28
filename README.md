@@ -1,5 +1,7 @@
 # Melete
 
+<img src="docs/prototypes/melete-icon-g1.svg" alt="Melete app icon" width="160">
+
 English | [日本語](README.ja.md)
 
 Melete is a macOS app for recording strength workouts and other exercise sessions. It lets you define exercises and the numeric values tracked for each one, then review workout history by date.
