@@ -24,6 +24,22 @@ struct ChatGPTOAuthTokenRequest {
     let method: String
     let headers: [String: String]
     let body: Data
+
+    // このファイルの外からは作れないようにし、builderを通ったrequestだけがこの型になるようにする
+    fileprivate init(url: URL, method: String, headers: [String: String], body: Data) {
+        self.url = url
+        self.method = method
+        self.headers = headers
+        self.body = body
+    }
+
+    #if DEBUG
+    // テスト専用: builderの出力ではない（改ざん・偽造した）requestを明示的に作る。
+    // DEBUG構成だけでコンパイルされ、Releaseには含まれない
+    static func forgedForTesting(url: URL, method: String, headers: [String: String], body: Data) -> Self {
+        Self(url: url, method: method, headers: headers, body: body)
+    }
+    #endif
 }
 
 // bodyに秘密値を含むため、print・dump・デバッガ表示では伏せ字にする

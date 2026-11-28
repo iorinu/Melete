@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0025F069ED680CA33AD3285C /* ChatGPTOAuthTokenHTTPTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF65315678F159D969E73D2D /* ChatGPTOAuthTokenHTTPTransport.swift */; };
 		00ACA143FD17BB6BCFFB6C25 /* AIResponsesRequestBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 125AE9CD302CEDDCED1F2D79 /* AIResponsesRequestBuilder.swift */; };
 		03FF497D33DF2E9E6354EC21 /* JOSESwift in Frameworks */ = {isa = PBXBuildFile; productRef = 6B26DDA9509AB6F6D1F3C464 /* JOSESwift */; };
 		043C5451204EE62AB2804BFA /* ScratchProbeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1BB64BA12B1D527769B260 /* ScratchProbeUITests.swift */; };
@@ -81,6 +82,7 @@
 		DE70BFA5C4C089846560F19F /* ScratchLaunchArgumentV1Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C005BB2C161F00A480485E /* ScratchLaunchArgumentV1Tests.swift */; };
 		DF895E2C0BCBD9DB0ACDE02C /* ChatGPTOpenAIIDTokenVerifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC6F92A44F4E0895E41253E4 /* ChatGPTOpenAIIDTokenVerifierTests.swift */; };
 		E44D87C14C5FEFFF6338E01F /* NIOHTTP1 in Frameworks */ = {isa = PBXBuildFile; productRef = 8530DE067625E06708A55A69 /* NIOHTTP1 */; };
+		E463C58F5F751F47C4FED9A4 /* ChatGPTOAuthTokenHTTPTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96066FF055337413C3E9340D /* ChatGPTOAuthTokenHTTPTransportTests.swift */; };
 		E4DE6836732A790E4B3275DA /* WorkoutValueEditingV2ScratchSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54122B29FF2530C13BFB9F84 /* WorkoutValueEditingV2ScratchSafetyTests.swift */; };
 		E7CFB24F18FEB8EC09F534FF /* ChatGPTOAuthAuthorizationRequestBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 149BD3D74C1455FD8FFA0000 /* ChatGPTOAuthAuthorizationRequestBuilderTests.swift */; };
 		EA8C26ECB01B60DC4448073D /* ExerciseArchiveToggleSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AF01A7C57273F88BC55E22B /* ExerciseArchiveToggleSafetyTests.swift */; };
@@ -154,6 +156,7 @@
 		87326F08CE3E82EC696E2EAB /* AIWorkoutProposalReviewFormTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIWorkoutProposalReviewFormTests.swift; sourceTree = "<group>"; };
 		8ABFF83F943F9BC5657E18FF /* MeleteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeleteTests.swift; sourceTree = "<group>"; };
 		8FA3E0E4963C97A5DE9BE350 /* AIResponsesChatProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIResponsesChatProvider.swift; sourceTree = "<group>"; };
+		96066FF055337413C3E9340D /* ChatGPTOAuthTokenHTTPTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTOAuthTokenHTTPTransportTests.swift; sourceTree = "<group>"; };
 		9683A7E092098837B675F367 /* ChatGPTOAuthTokenRequestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTOAuthTokenRequestTests.swift; sourceTree = "<group>"; };
 		983B3DB81B46A969C25607C6 /* AIResponsesHTTPTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIResponsesHTTPTransport.swift; sourceTree = "<group>"; };
 		986015D4F8ED5EDF1EFD8412 /* ChatGPTOAuthLoopbackHTTP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTOAuthLoopbackHTTP.swift; sourceTree = "<group>"; };
@@ -170,6 +173,7 @@
 		B746F260EB3958DAD3DD3837 /* WorkoutCreationV1StaleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutCreationV1StaleTests.swift; sourceTree = "<group>"; };
 		BA75BE3154B9A775CFCFBE14 /* AIWorkoutProposalReviewForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIWorkoutProposalReviewForm.swift; sourceTree = "<group>"; };
 		BDDA390E6DE88D0B22314460 /* ChatGPTOAuthLoopbackResponse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTOAuthLoopbackResponse.swift; sourceTree = "<group>"; };
+		BF65315678F159D969E73D2D /* ChatGPTOAuthTokenHTTPTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTOAuthTokenHTTPTransport.swift; sourceTree = "<group>"; };
 		C549F8E3F9832AE74F75622B /* AIWorkoutProposal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIWorkoutProposal.swift; sourceTree = "<group>"; };
 		C853E380DD66022E3E65B4D6 /* MetricDefinitionEditingV2RoundTripStaleDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDefinitionEditingV2RoundTripStaleDraftTests.swift; sourceTree = "<group>"; };
 		C871CAE169789FECB4314785 /* ScratchStoreIsolationSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScratchStoreIsolationSafetyTests.swift; sourceTree = "<group>"; };
@@ -229,6 +233,7 @@
 				570D6B4CB2BE9BDD5DCCFCC6 /* ChatGPTOAuthLoopbackListenerTests.swift */,
 				E3C02D0501C2E389367EE7EB /* ChatGPTOAuthLoopbackResponseTests.swift */,
 				82ECDF5FAEE8A83F3F484FC4 /* ChatGPTOAuthNIORuntimeTests.swift */,
+				96066FF055337413C3E9340D /* ChatGPTOAuthTokenHTTPTransportTests.swift */,
 				9683A7E092098837B675F367 /* ChatGPTOAuthTokenRequestTests.swift */,
 				A93C6E22BEA820C4FCB836FE /* ChatGPTOAuthTokenResponseTests.swift */,
 				FC6F92A44F4E0895E41253E4 /* ChatGPTOpenAIIDTokenVerifierTests.swift */,
@@ -322,6 +327,7 @@
 				EB740F996BCC9E7DB76FC573 /* ChatGPTOAuthLoopbackListener.swift */,
 				BDDA390E6DE88D0B22314460 /* ChatGPTOAuthLoopbackResponse.swift */,
 				7EBD8F7094B118E741F59AB5 /* ChatGPTOAuthNIORuntime.swift */,
+				BF65315678F159D969E73D2D /* ChatGPTOAuthTokenHTTPTransport.swift */,
 				7F867788B82DEEC45DEFE635 /* ChatGPTOAuthTokenRequest.swift */,
 				F486381CBF1293E75A01EE9F /* ChatGPTOAuthTokenResponse.swift */,
 				F0EE1318494B1F2442CA6E62 /* ChatGPTOpenAIIDTokenVerifier.swift */,
@@ -480,6 +486,7 @@
 				68837136085EBDDE3A8E8CF0 /* ChatGPTOAuthLoopbackListenerTests.swift in Sources */,
 				BF4B030182707FAD079F8321 /* ChatGPTOAuthLoopbackResponseTests.swift in Sources */,
 				2182D981A87B640BAEA764A5 /* ChatGPTOAuthNIORuntimeTests.swift in Sources */,
+				E463C58F5F751F47C4FED9A4 /* ChatGPTOAuthTokenHTTPTransportTests.swift in Sources */,
 				7CD5DA52F7169B709B6C863F /* ChatGPTOAuthTokenRequestTests.swift in Sources */,
 				7117480C16A4AAA6C9984B5C /* ChatGPTOAuthTokenResponseTests.swift in Sources */,
 				DF895E2C0BCBD9DB0ACDE02C /* ChatGPTOpenAIIDTokenVerifierTests.swift in Sources */,
@@ -534,6 +541,7 @@
 				3536A2B7C09E6379CF6F7C67 /* ChatGPTOAuthLoopbackListener.swift in Sources */,
 				AA7D7C560D7C2FFFE27EC693 /* ChatGPTOAuthLoopbackResponse.swift in Sources */,
 				2844E012A420F7DADA0CDF2C /* ChatGPTOAuthNIORuntime.swift in Sources */,
+				0025F069ED680CA33AD3285C /* ChatGPTOAuthTokenHTTPTransport.swift in Sources */,
 				0CAAD26CA9D4D22815FB993F /* ChatGPTOAuthTokenRequest.swift in Sources */,
 				ACF442A920E51E9C42CD7552 /* ChatGPTOAuthTokenResponse.swift in Sources */,
 				801D97E3CF567AC4F419394B /* ChatGPTOpenAIIDTokenVerifier.swift in Sources */,
