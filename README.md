@@ -1,6 +1,8 @@
 # Melete
 
-<img src="docs/prototypes/melete-icon-g1.svg" alt="Melete app icon" width="160">
+<p align="center">
+  <img src="docs/prototypes/melete-icon-g1.svg" alt="Melete app icon" width="160">
+</p>
 
 English | [日本語](README.ja.md)
 
