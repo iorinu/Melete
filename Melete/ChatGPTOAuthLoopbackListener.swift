@@ -11,14 +11,24 @@ final class ChatGPTOAuthLoopbackListener: Sendable {
 
     private let listener: ChatGPTOAuthNIOLoopbackListener
 
+    // responseCompletionHandler: callbackReceived応答の確定の受け取り先。
     init(expectedState: String, callbackSink: @escaping CallbackSink,
-         failureHandler: ChatGPTOAuthNIOLoopbackListener.FailureHandler? = nil) {
+         failureHandler: ChatGPTOAuthNIOLoopbackListener.FailureHandler? = nil,
+         responseCompletionHandler: ChatGPTOAuthNIOLoopbackListener.ResponseCompletionHandler? = nil) {
         listener = ChatGPTOAuthNIOLoopbackListener(
             expectedState: expectedState,
             callbackSink: callbackSink,
-            failureHandler: failureHandler
+            failureHandler: failureHandler,
+            responseCompletionHandler: responseCompletionHandler
         )
     }
+
+#if DEBUG
+    // テスト専用。start前だけ設定できる
+    func setResponseFlushTestHook(_ hook: ChatGPTOAuthNIOLoopbackListener.ResponseFlushTestHook?) {
+        listener.setResponseFlushTestHook(hook)
+    }
+#endif
 
     func start() async throws -> Int {
         try await listener.start()

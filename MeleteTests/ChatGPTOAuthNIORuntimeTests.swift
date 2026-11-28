@@ -12,7 +12,121 @@ final class ChatGPTOAuthNIORuntimeTests: XCTestCase {
     private let syntheticState = "SyntheticNIOLoopbackState-012345678901234567890123456789"
     private var listeners: [Listener] = []
 
-    #if DEBUG
+    #if DEBUG && MELETE_SCRATCH_ISOLATION
+    func testCallbackCompletionWaitsForOutputClosePromise() throws {
+        let sinkEntered = DispatchSemaphore(value: 0)
+        let completionRecorder = NIORuntimeResponseCompletionRecorder()
+        let decisionRecorder = NIORuntimeResponseCompletionRecorder()
+        let port = 43128
+        let harness = Listener.makeEmbeddedCallbackHandler(
+            expectedState: syntheticState,
+            callbackSink: { _ in sinkEntered.signal() },
+            boundPort: port,
+            responseCompletionHandler: { completionRecorder.record($0) },
+            suppressAutomaticSinkCompletionForTesting: true,
+            responseCompletionDecisionObserverForTesting: { decisionRecorder.record($0) }
+        )
+        let closeCapture = NIOEmbeddedOutputCloseCapture()
+        let channel = EmbeddedChannel(handlers: [closeCapture, harness.handler])
+        defer {
+            closeCapture.release(with: NIOEmbeddedOutputCloseCapture.cleanupError)
+            try? channel.embeddedEventLoop.run()
+            try? channel.close().wait()
+            try? channel.embeddedEventLoop.run()
+            try? harness.shutdown()
+        }
+
+        try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: port)).wait()
+        let head = HTTPRequestHead(
+            version: .http1_1,
+            method: .GET,
+            uri: "/auth/callback?code=synthetic-code&state=\(syntheticState)",
+            headers: ["Host": "127.0.0.1:\(port)"]
+        )
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertEqual(sinkEntered.wait(timeout: .now() + 2), .success)
+
+        // sink完了eventをテストスレッドから注入し、EmbeddedEventLoop操作をすべてこのスレッドに限定する。
+        channel.pipeline.fireUserInboundEventTriggered(NIOSinkCompletedEvent())
+        try channel.embeddedEventLoop.run()
+        guard closeCapture.promise != nil else {
+            XCTFail("close(mode: .output) promiseを捕捉できなかった")
+            return
+        }
+        XCTAssertTrue(decisionRecorder.completions.isEmpty,
+                      "output close promise未完了中に通知確定observerが呼ばれた")
+        XCTAssertTrue(completionRecorder.completions.isEmpty,
+                      "output close promise未完了中にcallback completion handlerが呼ばれた")
+
+        closeCapture.release(with: nil)
+        try channel.embeddedEventLoop.run()
+        XCTAssertEqual(decisionRecorder.completions, [.flushed],
+                       "output close promise完了後に通知確定observerが同期記録しなかった")
+        let completionDeadline = ContinuousClock.now + .seconds(2)
+        while completionRecorder.completions.isEmpty && ContinuousClock.now < completionDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertEqual(completionRecorder.completions, [.flushed], "close完了後に.flushed以外の通知、または重複通知が発生した")
+    }
+
+    func testOutputClosePromiseFailureDecidesOnceEvenAfterChannelInactive() throws {
+        let sinkEntered = DispatchSemaphore(value: 0)
+        let completionRecorder = NIORuntimeResponseCompletionRecorder()
+        let decisionRecorder = NIORuntimeResponseCompletionRecorder()
+        let port = 43129
+        let harness = Listener.makeEmbeddedCallbackHandler(
+            expectedState: syntheticState,
+            callbackSink: { _ in sinkEntered.signal() },
+            boundPort: port,
+            responseCompletionHandler: { completionRecorder.record($0) },
+            suppressAutomaticSinkCompletionForTesting: true,
+            responseCompletionDecisionObserverForTesting: { decisionRecorder.record($0) }
+        )
+        let closeCapture = NIOEmbeddedOutputCloseCapture()
+        let channel = EmbeddedChannel(handlers: [closeCapture, harness.handler])
+        defer {
+            closeCapture.release(with: NIOEmbeddedOutputCloseCapture.cleanupError)
+            try? channel.embeddedEventLoop.run()
+            try? channel.close().wait()
+            try? channel.embeddedEventLoop.run()
+            try? harness.shutdown()
+        }
+
+        try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: port)).wait()
+        let head = HTTPRequestHead(
+            version: .http1_1,
+            method: .GET,
+            uri: "/auth/callback?code=synthetic-code&state=\(syntheticState)",
+            headers: ["Host": "127.0.0.1:\(port)"]
+        )
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertEqual(sinkEntered.wait(timeout: .now() + 2), .success)
+
+        // 自動sink完了を抑制し、テストスレッド上で完了イベントを明示的に注入する。
+        channel.pipeline.fireUserInboundEventTriggered(NIOSinkCompletedEvent())
+        try channel.embeddedEventLoop.run()
+        guard closeCapture.promise != nil else {
+            XCTFail("close(mode: .output) promiseを捕捉できなかった")
+            return
+        }
+
+        closeCapture.release(with: NIOEmbeddedOutputCloseCapture.cleanupError)
+        try channel.embeddedEventLoop.run()
+        XCTAssertEqual(decisionRecorder.completions, [.failed],
+                       "output close promise失敗時に.failedが一度確定しなかった")
+        let completionDeadline = ContinuousClock.now + .seconds(2)
+        while completionRecorder.completions.isEmpty && ContinuousClock.now < completionDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertEqual(completionRecorder.completions, [.failed],
+                       "output close promise失敗時のcallback completionが.failed一度だけでなかった")
+
+        channel.pipeline.fireChannelInactive()
+        try channel.embeddedEventLoop.run()
+        XCTAssertEqual(decisionRecorder.completions, [.failed],
+                       "channelInactive後に通知確定observerが重複して呼ばれた")
+    }
+
     func testInputClosedWhileCallbackResponseWriteIsPendingKeepsChannelActive() throws {
         let sinkEntered = DispatchSemaphore(value: 0)
         let writeCapture = NIOEmbeddedPendingWriteCapture()
@@ -22,7 +136,8 @@ final class ChatGPTOAuthNIORuntimeTests: XCTestCase {
             callbackSink: { _ in
                 sinkEntered.signal()
             },
-            boundPort: port
+            boundPort: port,
+            suppressAutomaticSinkCompletionForTesting: true
         )
         let channel = EmbeddedChannel(handlers: [writeCapture, harness.handler])
         defer {
@@ -42,7 +157,9 @@ final class ChatGPTOAuthNIORuntimeTests: XCTestCase {
         )
         XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
         XCTAssertEqual(sinkEntered.wait(timeout: .now() + 2), .success, "callback sinkへ到達しなかった")
-        // sink完了イベントを処理し、response writeが未完了promiseで止まるところまで進める。
+        // sink完了eventをテストスレッドから注入し、response writeが未完了promiseで止まるところまで進める。
+        channel.pipeline.fireUserInboundEventTriggered(NIOSinkCompletedEvent())
+        try channel.embeddedEventLoop.run()
         let writeDeadline = ContinuousClock.now + .seconds(2)
         while writeCapture.promise == nil && ContinuousClock.now < writeDeadline {
             try channel.embeddedEventLoop.run()
@@ -301,6 +418,38 @@ private final class NIOEmbeddedPendingWriteCapture: ChannelOutboundHandler {
     }
 }
 
+#if DEBUG
+private final class NIOEmbeddedOutputCloseCapture: ChannelOutboundHandler {
+    typealias OutboundIn = ByteBuffer
+
+    static let cleanupError = NIOEmbeddedOutputCloseCleanupError()
+
+    private(set) var promise: EventLoopPromise<Void>?
+    private var eventLoop: (any EventLoop)?
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        eventLoop = context.eventLoop
+    }
+
+    func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
+        guard mode == .output, let promise else {
+            context.close(mode: mode, promise: promise)
+            return
+        }
+        self.promise = promise
+    }
+
+    func release(with error: (any Error)?) {
+        guard let eventLoop, let promise else { return }
+        precondition(eventLoop.inEventLoop, "close promiseはembedded eventLoop上でのみ完了させる")
+        self.promise = nil
+        if let error { promise.fail(error) } else { promise.succeed(()) }
+    }
+}
+
+private struct NIOEmbeddedOutputCloseCleanupError: Error {}
+#endif
+
 private struct NIOEmbeddedPendingWriteCleanupError: Error {}
 
 private struct NIOTestTimeout: Error {}
@@ -357,6 +506,25 @@ private final class NIORuntimeFailureRecorder: @unchecked Sendable {
         return stored
     }
 }
+
+#if DEBUG && MELETE_SCRATCH_ISOLATION
+private final class NIORuntimeResponseCompletionRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [ChatGPTOAuthLoginFlow.ResponseCompletion] = []
+
+    func record(_ completion: ChatGPTOAuthLoginFlow.ResponseCompletion) {
+        lock.lock()
+        stored.append(completion)
+        lock.unlock()
+    }
+
+    var completions: [ChatGPTOAuthLoginFlow.ResponseCompletion] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+#endif
 
 // 全socket操作は別スレッドで実行し、I/Oに期限を設ける。接続先は127.0.0.1のみ。
 private enum NIOTestSocket {
